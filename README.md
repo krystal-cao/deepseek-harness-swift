@@ -36,7 +36,7 @@ DSH Swift Native Shell 是 DSH Desktop 的独立 Swift 原生 macOS 实现。它
 ### 主界面
 
 <p align="center">
-  <img alt="DSH Swift 主界面" src="assets/主界面.heic" />
+  <img alt="DSH Swift 主界面" src="assets/主界面.png" />
 </p>
 
 ### 独立设置中心
@@ -45,17 +45,17 @@ DSH Swift Native Shell 是 DSH Desktop 的独立 Swift 原生 macOS 实现。它
 
 <h4 align="center">通用设置</h4>
 <p align="center">
-  <img alt="DSH Swift 通用设置" src="assets/通用设置.heic" />
+  <img alt="DSH Swift 通用设置" src="assets/通用设置.png" />
 </p>
 
 <h4 align="center">版本管理</h4>
 <p align="center">
-  <img alt="DSH Swift 版本管理" src="assets/版本管理.heic" />
+  <img alt="DSH Swift 版本管理" src="assets/版本管理.png" />
 </p>
 
 <h4 align="center">插件管理</h4>
 <p align="center">
-  <img alt="DSH Swift 插件管理" src="assets/插件管理.heic" />
+  <img alt="DSH Swift 插件管理" src="assets/插件管理.png" />
 </p>
 
 ## 主要特性

@@ -13,8 +13,8 @@ public struct AboutTabView: View {
         var id: String { name }
     }
 
-    private let projectURL = URL(string: "https://github.com/krystal-cao/deepseek-harness-desktop")!
-    private let licenseURL = URL(string: "https://github.com/krystal-cao/deepseek-harness-desktop/blob/main/LICENSE")!
+    private let projectURL = URL(string: "https://github.com/krystal-cao/deepseek-harness-swift")!
+    private let licenseURL = URL(string: "https://github.com/krystal-cao/deepseek-harness-swift/blob/main/LICENSE")!
     private let authorURL = URL(string: "https://github.com/krystal-cao")!
 
     private let openSourceProjects = [
