@@ -9,7 +9,7 @@
             <title>1.0.0</title>
             <pubDate>Tue, 25 Aug 2026 18:00:00 +0800</pubDate>
             <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
-            <sparkle:version>1</sparkle:version>
+            <sparkle:version>2</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
@@ -44,13 +44,13 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="46467519" type="application/octet-stream" sparkle:edSignature="2YEtocrPfW5KoUlv1pP7Pn3vmRBtuZ3lWh+anFgA7TYa8Hik3Y0CXS9Zu3FH5zZAyj6YItZBPxUYPhP+JFf7CA=="/>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="46590818" type="application/octet-stream" sparkle:edSignature="ojVGGQtcyaKWFBsm578Ynv0cjnZkLEeb1AUBeeJvITPpCVGDSsG7SC0oeQ8KwyFNIrsWGlXIJHhCZM5Gk6eUCg=="/>
         </item>
         <item>
             <title>1.0.0</title>
             <pubDate>Tue, 25 Aug 2026 18:00:00 +0800</pubDate>
             <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
-            <sparkle:version>1</sparkle:version>
+            <sparkle:version>2</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>x86_64</sparkle:hardwareRequirements>
@@ -85,7 +85,7 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="48427610" type="application/octet-stream" sparkle:edSignature="Y1nWI63x+EVzENOODkjLQNwlIl8Sc5YybOAAtNELR/xMWbRyozngKtJeiBVyN0CCEKcWPA4hri+jWp7hw8R4Aw=="/>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="47665988" type="application/octet-stream" sparkle:edSignature="z7i9Y+gixSF+VTn1Qc5jBhcco4y3W0HZyX2BkMXoixwGf/pocg9n7wNnlcr5x5JYFfaJgepIgndsGkoH+t9lAw=="/>
         </item>
     </channel>
 </rss>
