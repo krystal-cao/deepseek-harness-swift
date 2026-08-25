@@ -178,6 +178,8 @@ public final class DshPluginManager {
 
     /// Add a plugin by name or npm specifier.
     public func addPlugin(spec: String) async throws {
+        try await validateRegistryPackageIfNeeded(spec: spec)
+
         guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
               let node = NodeRuntime.shared.resolveNodeBinary() else {
             throw NSError(domain: "DshPluginManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "缺少 Node 或 pnpm"])
@@ -351,6 +353,45 @@ public final class DshPluginManager {
 
         let end = value.firstIndex(of: "@") ?? value.endIndex
         return String(value[..<end])
+    }
+
+    /// Match Electron's preflight check for npm registry plugins. A clear
+    /// 404 is actionable; network and other registry failures are left to
+    /// pnpm so its native error remains the source of truth.
+    private func validateRegistryPackageIfNeeded(spec: String) async throws {
+        let value = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.hasPrefix("github:"),
+              !value.hasPrefix("file:"),
+              !value.hasPrefix("link:"),
+              !value.hasPrefix("workspace:"),
+              !value.hasPrefix("./"),
+              !value.hasPrefix("../"),
+              let name = packageName(from: value),
+              let encodedName = name.addingPercentEncoding(withAllowedCharacters: .alphanumerics) else {
+            return
+        }
+
+        let registry = DshStateManager.shared.current.npmRegistry ?? DshVersionManager.defaultRegistry
+        let base = registry.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: "\(base)/\(encodedName)") else { return }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 8
+        request.setValue("application/vnd.npm.install-v1+json", forHTTPHeaderField: "Accept")
+
+        let response: URLResponse
+        do {
+            (_, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            return
+        }
+
+        guard (response as? HTTPURLResponse)?.statusCode == 404 else { return }
+        throw NSError(
+            domain: "DshPluginManager",
+            code: -7,
+            userInfo: [NSLocalizedDescriptionKey: "未找到 npm 包 \(name)（HTTP 404），请检查拼写或确认该包已发布到当前镜像"]
+        )
     }
 
     /// Keep the local bridge dependency and pnpm lockfile aligned with the

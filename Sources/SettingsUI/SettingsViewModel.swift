@@ -328,7 +328,8 @@ public final class SettingsViewModel: ObservableObject {
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.alertMessage = error.localizedDescription
+                let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                self.alertMessage = message.isEmpty ? "安装插件 \(spec) 失败" : message
             }
         }
     }
