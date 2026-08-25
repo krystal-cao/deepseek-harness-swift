@@ -24,12 +24,12 @@ DSH Swift Native Shell 是 DSH Desktop 的独立 Swift 原生 macOS 实现。它
 
 ## 下载
 
-当前 Swift 原生版安装包发布在 [DSH Desktop Releases](https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0-swift)。
+当前 Swift 原生版安装包发布在 [DSH Desktop Releases](https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0)。
 
 | 平台 | 架构 | 安装包 | 下载 |
 | --- | --- | --- | --- |
-| macOS | Apple Silicon | DMG | [下载 arm64](https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0-swift/DSH-Desktop-1.0.0-arm64.dmg) |
-| macOS | Intel | DMG | [下载 x86_64](https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0-swift/DSH-Desktop-1.0.0-x64.dmg) |
+| macOS | Apple Silicon | DMG | [下载 arm64](https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg) |
+| macOS | Intel | DMG | [下载 x86_64](https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg) |
 
 ## 界面预览
 
