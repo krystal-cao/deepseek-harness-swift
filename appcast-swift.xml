@@ -44,7 +44,7 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="46590783" type="application/octet-stream" sparkle:edSignature="zqDF8jcYYV9qNoAKg0fK5ThbABJRCzZfsHfaCH5LZgykTpA6CjmPDClwwevv74jXi721HQl8gLId9fJs4wCVBA=="/>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="46467519" type="application/octet-stream" sparkle:edSignature="2YEtocrPfW5KoUlv1pP7Pn3vmRBtuZ3lWh+anFgA7TYa8Hik3Y0CXS9Zu3FH5zZAyj6YItZBPxUYPhP+JFf7CA=="/>
         </item>
         <item>
             <title>1.0.0</title>
@@ -85,7 +85,7 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="47665877" type="application/octet-stream" sparkle:edSignature="a3OHUCv2mqSfkM33bTMAEvsxkd7JTQkHaLOxFQXYI+LXZVQySRvoM6KKxgD/NmeJpPDmlNr6XHBo+SPV/qXnDw=="/>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="48427610" type="application/octet-stream" sparkle:edSignature="Y1nWI63x+EVzENOODkjLQNwlIl8Sc5YybOAAtNELR/xMWbRyozngKtJeiBVyN0CCEKcWPA4hri+jWp7hw8R4Aw=="/>
         </item>
     </channel>
 </rss>
