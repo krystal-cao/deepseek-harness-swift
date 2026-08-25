@@ -17,7 +17,7 @@ public struct PluginsTabView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsSection("安装插件", footer: "插件会安装到 web profile；成功后 DSH 服务会自动重启。") {
+            SettingsSection("安装插件", footer: "通过 DSH 的插件机制安装到 web profile，安装或卸载成功后会自动重启 DSH 服务。") {
                 HStack(spacing: 9) {
                     TextField("npm 包名、@scope/name 或 github:owner/repo", text: Binding(
                         get: { localState.newPluginSpec },
@@ -44,12 +44,24 @@ public struct PluginsTabView: View {
             if viewModel.isOperatingPlugin {
                 HStack(spacing: 9) {
                     ProgressView().controlSize(.small)
-                    Text("正在执行插件操作：\(viewModel.operatingPluginName ?? "")")
+                    Text(viewModel.operatingPluginName ?? "")
                         .font(.system(size: 11.5, weight: .medium))
                     Spacer()
                 }
                 .padding(11)
                 .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            if let pluginStatusMessage = viewModel.pluginStatusMessage {
+                HStack(spacing: 9) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                    Text(pluginStatusMessage)
+                        .font(.system(size: 11.5, weight: .medium))
+                    Spacer()
+                }
+                .padding(11)
+                .background(Color.green.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
             SettingsSection("已安装插件", footer: "内置桥接插件由 DSH Desktop 维护，不能卸载。") {
@@ -89,7 +101,7 @@ public struct PluginsTabView: View {
 
                     if viewModel.installedPlugins.isEmpty {
                         HStack(spacing: 9) {
-                            Text("暂无安装的扩展插件")
+                            Text("暂无已安装的第三方插件")
                                 .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -128,7 +140,7 @@ public struct PluginsTabView: View {
                             .foregroundStyle(.green)
                     }
                 }
-                Text(pluginDescription(for: plugin.name))
+                Text(plugin.description ?? "DSH web profile 扩展插件。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -168,14 +180,4 @@ public struct PluginsTabView: View {
         return version.hasPrefix("file:") || version.hasPrefix("link:") ? "本地" : version
     }
 
-    private func pluginDescription(for name: String) -> String {
-        switch name {
-        case "dsh-better-sidebar": return "VSCode 风格的文件、编辑器、终端、Git 与浏览器侧栏。"
-        case "dshmarket": return "在 DSH 内浏览、搜索和安装社区插件。"
-        case "dsh-desktop-host": return "向桌面外壳报告就绪状态、主题和本地化变化。"
-        case "@deepseek-ai/dsh-subagent-claude-code": return "Claude Code 子代理工具集成。"
-        case "@deepseek-ai/dsh-subagent-codex": return "Codex 子代理工具集成。"
-        default: return "DSH web profile 扩展插件。"
-        }
-    }
 }

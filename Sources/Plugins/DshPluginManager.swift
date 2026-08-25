@@ -5,6 +5,7 @@ public struct DshPluginItem: Identifiable, Equatable {
     public let name: String
     public let version: String?
     public let latestVersion: String?
+    public let description: String?
     public let isManaged: Bool
     public let isLocal: Bool
 
@@ -14,10 +15,11 @@ public struct DshPluginItem: Identifiable, Equatable {
         return latest != cleanCurrent && !isLocal && !isManaged
     }
 
-    public init(name: String, version: String? = nil, latestVersion: String? = nil, isManaged: Bool = false, isLocal: Bool = false) {
+    public init(name: String, version: String? = nil, latestVersion: String? = nil, description: String? = nil, isManaged: Bool = false, isLocal: Bool = false) {
         self.name = name
         self.version = version
         self.latestVersion = latestVersion
+        self.description = description
         self.isManaged = isManaged
         self.isLocal = isLocal
     }
@@ -54,7 +56,15 @@ public final class DshPluginManager {
             let isManaged = (name == Self.desktopHostPluginName)
             let isLocal = spec.hasPrefix("file:") || spec.hasPrefix("link:")
             let latest = outdatedMap[name]
-            list.append(DshPluginItem(name: name, version: spec, latestVersion: latest, isManaged: isManaged, isLocal: isLocal))
+            let description = readPluginDescription(name: name, profileDir: profileDir)
+            list.append(DshPluginItem(
+                name: name,
+                version: spec,
+                latestVersion: latest,
+                description: description,
+                isManaged: isManaged,
+                isLocal: isLocal
+            ))
         }
 
         // Pinned managed plugin at bottom, others alphabetical
@@ -62,6 +72,27 @@ public final class DshPluginManager {
             if a.isManaged != b.isManaged { return !a.isManaged }
             return a.name.localizedCompare(b.name) == .orderedAscending
         }
+    }
+
+    /// Read display metadata from the installed plugin tree.
+    ///
+    /// Keep this aligned with Electron's `enrichPluginMetadata`: descriptions
+    /// are optional metadata from the exact package currently installed in the
+    /// profile, rather than data fetched from the registry. `node_modules`
+    /// entries may be symlinks created by pnpm; Data(contentsOf:) follows them.
+    private func readPluginDescription(name: String, profileDir: URL) -> String? {
+        let manifestURL = profileDir
+            .appendingPathComponent("node_modules", isDirectory: true)
+            .appendingPathComponent(name, isDirectory: true)
+            .appendingPathComponent("package.json")
+
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let description = manifest["description"] as? String,
+              !description.isEmpty else {
+            return nil
+        }
+        return description
     }
 
     /// Match Electron's external-theme detection for the native settings UI.

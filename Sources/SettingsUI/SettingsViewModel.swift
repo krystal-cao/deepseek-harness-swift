@@ -39,6 +39,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var isCheckingPluginUpdates: Bool = false
     @Published public var isOperatingPlugin: Bool = false
     @Published public var operatingPluginName: String? = nil
+    @Published public var pluginStatusMessage: String? = nil
     @Published public var alertMessage: String? = nil
 
     private var isFollowingLatest = false
@@ -133,19 +134,21 @@ public final class SettingsViewModel: ObservableObject {
     public func updatePlugin(name: String) {
         guard !isOperatingPlugin else { return }
         isOperatingPlugin = true
-        operatingPluginName = name
+        pluginStatusMessage = nil
+        operatingPluginName = "正在更新 \(name)…"
         Task {
             do {
                 try await DshPluginManager.shared.updatePlugin(name: name)
                 self.outdatedPluginsMap.removeValue(forKey: name)
                 self.refreshPlugins()
+                try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.restartDshService()
+                self.pluginStatusMessage = "插件 \(name) 更新成功，服务重启中…"
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.alertMessage = "更新插件失败：\(error.localizedDescription)"
+                self.alertMessage = error.localizedDescription
             }
         }
     }
@@ -153,19 +156,22 @@ public final class SettingsViewModel: ObservableObject {
     public func updateAllPlugins() {
         guard !isOperatingPlugin else { return }
         isOperatingPlugin = true
-        operatingPluginName = "全部插件"
+        pluginStatusMessage = nil
+        let count = installedPlugins.filter(\.hasUpdate).count
+        operatingPluginName = "正在更新插件（0/\(count)）…"
         Task {
             do {
                 try await DshPluginManager.shared.updateAllPlugins()
                 self.outdatedPluginsMap.removeAll()
                 self.refreshPlugins()
+                try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.restartDshService()
+                self.pluginStatusMessage = "全部插件已更新至最新版本"
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.alertMessage = "批量更新插件失败：\(error.localizedDescription)"
+                self.alertMessage = error.localizedDescription
             }
         }
     }
@@ -307,14 +313,16 @@ public final class SettingsViewModel: ObservableObject {
     public func addPlugin(spec: String) {
         guard !isOperatingPlugin, !spec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isOperatingPlugin = true
-        operatingPluginName = spec
+        pluginStatusMessage = nil
+        operatingPluginName = "正在安装插件 \(spec)…"
         Task {
             do {
                 try await DshPluginManager.shared.addPlugin(spec: spec)
                 self.refreshPlugins()
+                try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.restartDshService()
+                self.pluginStatusMessage = "插件 \(spec) 安装成功，服务重启中…"
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -326,15 +334,17 @@ public final class SettingsViewModel: ObservableObject {
     public func removePlugin(name: String) {
         guard !isOperatingPlugin else { return }
         isOperatingPlugin = true
-        operatingPluginName = name
+        pluginStatusMessage = nil
+        operatingPluginName = "正在卸载插件 \(name)…"
         Task {
             do {
                 try await DshPluginManager.shared.removePlugin(name: name)
                 self.outdatedPluginsMap.removeValue(forKey: name)
                 self.refreshPlugins()
+                try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.restartDshService()
+                self.pluginStatusMessage = "插件 \(name) 已卸载，服务重启中…"
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
