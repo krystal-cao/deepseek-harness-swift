@@ -43,6 +43,8 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var alertMessage: String? = nil
 
     private var isFollowingLatest = false
+    private var pluginStatusDismissTask: Task<Void, Never>?
+    private var pluginStatusGeneration = 0
 
     private init() {
         if let savedPanel = UserDefaults.standard.object(forKey: Self.selectedPanelDefaultsKey) as? Int,
@@ -134,7 +136,7 @@ public final class SettingsViewModel: ObservableObject {
     public func updatePlugin(name: String) {
         guard !isOperatingPlugin else { return }
         isOperatingPlugin = true
-        pluginStatusMessage = nil
+        clearPluginStatus()
         operatingPluginName = "正在更新 \(name)…"
         Task {
             do {
@@ -144,7 +146,7 @@ public final class SettingsViewModel: ObservableObject {
                 try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.pluginStatusMessage = "插件 \(name) 更新成功，服务重启中…"
+                self.showPluginStatus("插件 \(name) 更新成功，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -156,7 +158,7 @@ public final class SettingsViewModel: ObservableObject {
     public func updateAllPlugins() {
         guard !isOperatingPlugin else { return }
         isOperatingPlugin = true
-        pluginStatusMessage = nil
+        clearPluginStatus()
         let count = installedPlugins.filter(\.hasUpdate).count
         operatingPluginName = "正在更新插件（0/\(count)）…"
         Task {
@@ -167,7 +169,7 @@ public final class SettingsViewModel: ObservableObject {
                 try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.pluginStatusMessage = "全部插件已更新至最新版本"
+                self.showPluginStatus("全部插件已更新至最新版本，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -313,7 +315,7 @@ public final class SettingsViewModel: ObservableObject {
     public func addPlugin(spec: String) {
         guard !isOperatingPlugin, !spec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isOperatingPlugin = true
-        pluginStatusMessage = nil
+        clearPluginStatus()
         operatingPluginName = "正在安装插件 \(spec)…"
         Task {
             do {
@@ -322,7 +324,7 @@ public final class SettingsViewModel: ObservableObject {
                 try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.pluginStatusMessage = "插件 \(spec) 安装成功，服务重启中…"
+                self.showPluginStatus("插件 \(spec) 安装成功，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -334,7 +336,7 @@ public final class SettingsViewModel: ObservableObject {
     public func removePlugin(name: String) {
         guard !isOperatingPlugin else { return }
         isOperatingPlugin = true
-        pluginStatusMessage = nil
+        clearPluginStatus()
         operatingPluginName = "正在卸载插件 \(name)…"
         Task {
             do {
@@ -344,7 +346,7 @@ public final class SettingsViewModel: ObservableObject {
                 try await self.restartDshServiceAndWait()
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.pluginStatusMessage = "插件 \(name) 已卸载，服务重启中…"
+                self.showPluginStatus("插件 \(name) 已卸载，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -373,6 +375,28 @@ public final class SettingsViewModel: ObservableObject {
 
     private func restartDshServiceAndWait() async throws {
         _ = try await MainWindowController.shared.restartDshService()
+    }
+
+    private func clearPluginStatus() {
+        pluginStatusGeneration &+= 1
+        pluginStatusDismissTask?.cancel()
+        pluginStatusDismissTask = nil
+        pluginStatusMessage = nil
+    }
+
+    private func showPluginStatus(_ message: String) {
+        pluginStatusGeneration &+= 1
+        let generation = pluginStatusGeneration
+        pluginStatusDismissTask?.cancel()
+        pluginStatusMessage = message
+        pluginStatusDismissTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled,
+                  let self,
+                  self.pluginStatusGeneration == generation else { return }
+            self.pluginStatusMessage = nil
+            self.pluginStatusDismissTask = nil
+        }
     }
 
     private func holdRefreshAnimation(since startedAt: Date) async {
