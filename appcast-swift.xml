@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>DSH Swift Updates</title>
+        <link>https://github.com/krystal-cao/deepseek-harness-swift/releases</link>
+        <description>Updates for the native Swift shell of DSH Desktop.</description>
+        <language>zh-CN</language>
+        <item>
+            <title>1.0.0</title>
+            <pubDate>Tue, 25 Aug 2026 18:00:00 +0800</pubDate>
+            <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[
+## 更新内容
+
+### Swift 原生 macOS 壳
+
+- 基于 AppKit、SwiftUI 和 WKWebView 的原生 macOS 桌面壳。
+- 设置页采用接近 macOS 系统设置的布局，并跟随系统深浅色模式。
+- 主窗口支持 macOS 交通灯、窗口拖拽、Dock 恢复和独立设置窗口。
+- 菜单支持设置、重启 DSH 服务、检查更新和独立“关于 DSH”窗口。
+
+### DSH 运行时与版本管理
+
+- Swift 应用包只内置 Node.js 和 pnpm，不内置 DSH 本体。
+- 首次启动时从 npm Registry 下载并安装 DSH。
+- 支持 DSH 版本安装、切换、卸载和自动跟随 npm latest。
+- 版本安装目录、package manifest 和 bin.js 入口会进行完整校验。
+- 版本切换失败时自动恢复原版本并尝试恢复服务。
+- 版本页只显示最近 5 个官方 DSH 版本。
+
+### 插件、通知与更新
+
+- 支持 web profile 插件安装、更新、卸载和服务重启。
+- 支持 DSH 任务完成系统通知。
+- 使用 Sparkle 提供 Swift 应用包检查更新和签名更新。
+
+## 已知限制
+
+- macOS 构建使用 ad-hoc 签名，首次打开如遇拦截，请右键选择“打开”，或前往“系统设置 → 隐私与安全性”放行。
+- 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
+- Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
+]]></description>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="46590783" type="application/octet-stream" sparkle:edSignature="zqDF8jcYYV9qNoAKg0fK5ThbABJRCzZfsHfaCH5LZgykTpA6CjmPDClwwevv74jXi721HQl8gLId9fJs4wCVBA=="/>
+        </item>
+        <item>
+            <title>1.0.0</title>
+            <pubDate>Tue, 25 Aug 2026 18:00:00 +0800</pubDate>
+            <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
+            <sparkle:version>1</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>x86_64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[
+## 更新内容
+
+### Swift 原生 macOS 壳
+
+- 基于 AppKit、SwiftUI 和 WKWebView 的原生 macOS 桌面壳。
+- 设置页采用接近 macOS 系统设置的布局，并跟随系统深浅色模式。
+- 主窗口支持 macOS 交通灯、窗口拖拽、Dock 恢复和独立设置窗口。
+- 菜单支持设置、重启 DSH 服务、检查更新和独立“关于 DSH”窗口。
+
+### DSH 运行时与版本管理
+
+- Swift 应用包只内置 Node.js 和 pnpm，不内置 DSH 本体。
+- 首次启动时从 npm Registry 下载并安装 DSH。
+- 支持 DSH 版本安装、切换、卸载和自动跟随 npm latest。
+- 版本安装目录、package manifest 和 bin.js 入口会进行完整校验。
+- 版本切换失败时自动恢复原版本并尝试恢复服务。
+- 版本页只显示最近 5 个官方 DSH 版本。
+
+### 插件、通知与更新
+
+- 支持 web profile 插件安装、更新、卸载和服务重启。
+- 支持 DSH 任务完成系统通知。
+- 使用 Sparkle 提供 Swift 应用包检查更新和签名更新。
+
+## 已知限制
+
+- macOS 构建使用 ad-hoc 签名，首次打开如遇拦截，请右键选择“打开”，或前往“系统设置 → 隐私与安全性”放行。
+- 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
+- Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
+]]></description>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="47665877" type="application/octet-stream" sparkle:edSignature="a3OHUCv2mqSfkM33bTMAEvsxkd7JTQkHaLOxFQXYI+LXZVQySRvoM6KKxgD/NmeJpPDmlNr6XHBo+SPV/qXnDw=="/>
+        </item>
+    </channel>
+</rss>

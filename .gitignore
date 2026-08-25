@@ -1,0 +1,6 @@
+.build/
+dist/
+assets/node/
+assets/bin/pnpm-pkg/
+DSH.xcodeproj/**/xcuserdata/
+.DS_Store
