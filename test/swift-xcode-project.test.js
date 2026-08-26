@@ -10,6 +10,10 @@ const INFO_PLIST_SOURCE = fs.readFileSync(
   new URL('../Info.plist', import.meta.url),
   'utf8',
 )
+const ABOUT_TAB_SOURCE = fs.readFileSync(
+  new URL('../Sources/SettingsUI/AboutTabView.swift', import.meta.url),
+  'utf8',
+)
 const VERSION_CONFIG_SOURCE = fs.readFileSync(
   new URL('../Version.xcconfig', import.meta.url),
   'utf8',
@@ -125,4 +129,7 @@ test('Swift build delegates compilation to xcodebuild and keeps the app metadata
   assert.match(INFO_PLIST_SOURCE, /<key>SUPublicEDKey<\/key>\s*<string>[A-Za-z0-9+/=]+<\/string>/)
   assert.match(INFO_PLIST_SOURCE, /<key>SUVerifyUpdateBeforeExtraction<\/key>\s*<true\/>/)
   assert.match(BUILD_SOURCE, /SWIFT_APP_BUILD/)
+  assert.match(ABOUT_TAB_SOURCE, /CFBundleVersion/)
+  assert.match(ABOUT_TAB_SOURCE, /AboutValueRow\(title: "版本", value: appVersionDisplay\)/)
+  assert.match(ABOUT_TAB_SOURCE, /appVersionDisplay/)
 })

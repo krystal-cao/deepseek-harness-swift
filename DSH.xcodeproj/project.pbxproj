@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 54;
+	objectVersion = 100;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -71,7 +71,6 @@
 /* Begin PBXFrameworksBuildPhase section */
 		F00000000000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				E00000000000000000000021 /* AppKit.framework in Frameworks */,
 				E00000000000000000000022 /* WebKit.framework in Frameworks */,
@@ -79,7 +78,6 @@
 				E00000000000000000000024 /* UserNotifications.framework in Frameworks */,
 				E00000000000000000000026 /* Sparkle in Frameworks */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
@@ -237,8 +235,6 @@
 			);
 			buildRules = (
 			);
-			dependencies = (
-			);
 			name = DSH;
 			packageProductDependencies = (
 				D00000000000000000000047 /* Sparkle */,
@@ -265,7 +261,6 @@
 				};
 			};
 			buildConfigurationList = C00000000000000000000001 /* Build configuration list for PBXProject "DSH" */;
-			compatibilityVersion = "Xcode 3.2";
 			developmentRegion = zh_CN;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -276,6 +271,7 @@
 			packageReferences = (
 				D00000000000000000000048 /* XCRemoteSwiftPackageReference "Sparkle" */,
 			);
+			preferredProjectObjectVersion = 100;
 			productRefGroup = D00000000000000000000004 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -288,11 +284,9 @@
 /* Begin PBXResourcesBuildPhase section */
 		F00000000000000000000003 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				219B7784303D55A30070FBF5 /* app.icon in Resources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
 
@@ -300,24 +294,36 @@
 		F00000000000000000000004 /* Copy DSH runtime resources */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
 			name = "Copy DSH runtime resources";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/bash;
-			shellScript = "set -euo pipefail\nSWIFT_ASSETS_DIR=\"${SRCROOT}/assets\"\nRESOURCES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"${RESOURCES_DIR}/node/bin\" \"${RESOURCES_DIR}/assets/bin\"\ncp \"${SWIFT_ASSETS_DIR}/dsh-family.json\" \"${RESOURCES_DIR}/assets/dsh-family.json\"\ncp \"${SWIFT_ASSETS_DIR}/bin/pnpm\" \"${RESOURCES_DIR}/assets/bin/pnpm\"\nif [ -d \"${SWIFT_ASSETS_DIR}/node/bin\" ]; then\n\tcp -R \"${SWIFT_ASSETS_DIR}/node/bin/.\" \"${RESOURCES_DIR}/node/bin/\"\nfi\nif [ ! -f \"${SWIFT_ASSETS_DIR}/bin/pnpm-pkg/bin/pnpm.cjs\" ]; then\n\tbash \"${SRCROOT}/scripts/fetch-pnpm.sh\"\nfi\ncp -R \"${SWIFT_ASSETS_DIR}/bin/pnpm-pkg\" \"${RESOURCES_DIR}/assets/bin/\"\nif [ ! -d \"${SWIFT_ASSETS_DIR}/dsh-desktop-host\" ]; then\n\techo \"Swift bridge plugin is missing: ${SWIFT_ASSETS_DIR}/dsh-desktop-host\" >&2\n\texit 1\nfi\ncp -R \"${SWIFT_ASSETS_DIR}/dsh-desktop-host\" \"${RESOURCES_DIR}/assets/\"\nchmod +x \"${RESOURCES_DIR}/node/bin/node\" \"${RESOURCES_DIR}/assets/bin/pnpm\" 2>/dev/null || true\n";
+			shellScript = (
+				"set -euo pipefail",
+				"SWIFT_ASSETS_DIR=\"${SRCROOT}/assets\"",
+				"RESOURCES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"",
+				"mkdir -p \"${RESOURCES_DIR}/node/bin\" \"${RESOURCES_DIR}/assets/bin\"",
+				"cp \"${SWIFT_ASSETS_DIR}/dsh-family.json\" \"${RESOURCES_DIR}/assets/dsh-family.json\"",
+				"cp \"${SWIFT_ASSETS_DIR}/bin/pnpm\" \"${RESOURCES_DIR}/assets/bin/pnpm\"",
+				"if [ -d \"${SWIFT_ASSETS_DIR}/node/bin\" ]; then",
+				"\tcp -R \"${SWIFT_ASSETS_DIR}/node/bin/.\" \"${RESOURCES_DIR}/node/bin/\"",
+				"fi",
+				"if [ ! -f \"${SWIFT_ASSETS_DIR}/bin/pnpm-pkg/bin/pnpm.cjs\" ]; then",
+				"\tbash \"${SRCROOT}/scripts/fetch-pnpm.sh\"",
+				"fi",
+				"cp -R \"${SWIFT_ASSETS_DIR}/bin/pnpm-pkg\" \"${RESOURCES_DIR}/assets/bin/\"",
+				"if [ ! -d \"${SWIFT_ASSETS_DIR}/dsh-desktop-host\" ]; then",
+				"\techo \"Swift bridge plugin is missing: ${SWIFT_ASSETS_DIR}/dsh-desktop-host\" >&2",
+				"\texit 1",
+				"fi",
+				"cp -R \"${SWIFT_ASSETS_DIR}/dsh-desktop-host\" \"${RESOURCES_DIR}/assets/\"",
+				"chmod +x \"${RESOURCES_DIR}/node/bin/node\" \"${RESOURCES_DIR}/assets/bin/pnpm\" 2>/dev/null || true",
+				"",
+			);
 		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		F00000000000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
 			files = (
 				E00000000000000000000001 /* main.swift in Sources */,
 				E00000000000000000000002 /* AppDelegate.swift in Sources */,
@@ -341,12 +347,11 @@
 				E00000000000000000000020 /* SettingsWindowController.swift in Sources */,
 				E00000000000000000000025 /* AppUpdateManager.swift in Sources */,
 			);
-			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		C00000000000000000000003 /* Debug */ = {
+		C00000000000000000000003 /* Debug configuration for PBXProject "DSH" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -355,7 +360,7 @@
 			};
 			name = Debug;
 		};
-		C00000000000000000000004 /* Release */ = {
+		C00000000000000000000004 /* Release configuration for PBXProject "DSH" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
@@ -365,7 +370,7 @@
 			};
 			name = Release;
 		};
-		C00000000000000000000005 /* Debug */ = {
+		C00000000000000000000005 /* Debug configuration for PBXNativeTarget "DSH" */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = D00000000000000000000044 /* Version.xcconfig */;
 			buildSettings = {
@@ -377,6 +382,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -389,7 +395,7 @@
 			};
 			name = Debug;
 		};
-		C00000000000000000000006 /* Release */ = {
+		C00000000000000000000006 /* Release configuration for PBXNativeTarget "DSH" */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = D00000000000000000000044 /* Version.xcconfig */;
 			buildSettings = {
@@ -401,6 +407,7 @@
 				ENABLE_HARDENED_RUNTIME = NO;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -420,19 +427,17 @@
 		C00000000000000000000001 /* Build configuration list for PBXProject "DSH" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				C00000000000000000000003 /* Debug */,
-				C00000000000000000000004 /* Release */,
+				C00000000000000000000003 /* Debug configuration for PBXProject "DSH" */,
+				C00000000000000000000004 /* Release configuration for PBXProject "DSH" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 		C00000000000000000000002 /* Build configuration list for PBXNativeTarget "DSH" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				C00000000000000000000005 /* Debug */,
-				C00000000000000000000006 /* Release */,
+				C00000000000000000000005 /* Debug configuration for PBXNativeTarget "DSH" */,
+				C00000000000000000000006 /* Release configuration for PBXNativeTarget "DSH" */,
 			);
-			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */

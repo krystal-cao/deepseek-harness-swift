@@ -41,6 +41,14 @@ public struct AboutTabView: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版"
     }
 
+    private var appBuild: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "开发版"
+    }
+
+    private var appVersionDisplay: String {
+        "\(appVersion) build \(appBuild)"
+    }
+
     private var appIcon: NSImage {
         ApplicationIcon.image
     }
@@ -53,7 +61,7 @@ public struct AboutTabView: View {
                 "应用",
                 footer: "DSH Desktop 是非官方社区项目，与 DeepSeek 不存在隶属或官方合作关系。"
             ) {
-                AboutValueRow(title: "版本", value: appVersion)
+                AboutValueRow(title: "版本", value: appVersionDisplay)
 
                 SettingsDivider()
 
@@ -119,7 +127,7 @@ public struct AboutTabView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
-                Text("版本 \(appVersion)")
+                Text("版本 \(appVersionDisplay)")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
