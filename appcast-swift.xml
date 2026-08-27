@@ -7,9 +7,9 @@
         <language>zh-CN</language>
         <item>
             <title>1.0.0</title>
-            <pubDate>Wed, 26 Aug 2026 09:44:34 +0800</pubDate>
+            <pubDate>Thu, 27 Aug 2026 10:03:27 +0800</pubDate>
             <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
-            <sparkle:version>6</sparkle:version>
+            <sparkle:version>7</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
@@ -40,6 +40,7 @@
 - 插件操作成功提示在服务重启完成后显示，并于 2 秒后自动隐藏。
 - 支持 DSH 任务完成系统通知。
 - 使用 Sparkle 提供 Swift 应用包检查更新和签名更新。
+- 改进 DSH Web 进程回收，避免应用异常退出后残留服务占用端口。
 
 ## 已知限制
 
@@ -47,13 +48,13 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="46599382" type="application/octet-stream" sparkle:edSignature="g/XqKp/tunu56n0D2h7lkCn7al8YHyQeOaqXHJT2gHBnMhIeAEqkAJiqZpDf9EcTKPaLA30AvBOmo6ICSRxxCQ=="/>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="53178473" type="application/octet-stream" sparkle:edSignature="p8hx9UZx2dJg6Cc7JSLQbYP3p8qvayvXxHrKbV3laBEU2eaEcY+g0hEYViZD69yFP9aeWhgMBbj7zv4FyMzGCw=="/>
         </item>
         <item>
             <title>1.0.0</title>
-            <pubDate>Wed, 26 Aug 2026 09:44:34 +0800</pubDate>
+            <pubDate>Thu, 27 Aug 2026 10:03:27 +0800</pubDate>
             <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
-            <sparkle:version>6</sparkle:version>
+            <sparkle:version>7</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>x86_64</sparkle:hardwareRequirements>
@@ -84,6 +85,7 @@
 - 插件操作成功提示在服务重启完成后显示，并于 2 秒后自动隐藏。
 - 支持 DSH 任务完成系统通知。
 - 使用 Sparkle 提供 Swift 应用包检查更新和签名更新。
+- 改进 DSH Web 进程回收，避免应用异常退出后残留服务占用端口。
 
 ## 已知限制
 
@@ -91,7 +93,7 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="47681169" type="application/octet-stream" sparkle:edSignature="UFuzgDOY9tvq/3mSZiW6Z/7kct4VukyMW7/lLlnVIlnaf/3gQEmIhkO5kdhwmqMq4R56YNvfeh1sYCr3uOa3CA=="/>
+            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="54494455" type="application/octet-stream" sparkle:edSignature="Roh1CPhdrSCVaaQeVpN7V7uFuJlcQK13q5WDfcoRuDbh/TZHr/4vJYLzBQzPknK6A2X2g1tubFiWInTzKpmZDw=="/>
         </item>
     </channel>
 </rss>

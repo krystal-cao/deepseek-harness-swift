@@ -5,9 +5,24 @@ import Darwin
 public final class DshService: @unchecked Sendable {
     public static let shared = DshService()
 
-    private var process: Process?
+    private struct ManagedDshProcess {
+        let process: Process
+        let hasProcessGroup: Bool
+    }
+
+    private struct DshProcessRecord: Codable {
+        let pid: Int32
+        let port: Int
+        let nodePath: String
+        let entryPath: String
+        let processGroupID: Int32?
+    }
+
+    private var process: ManagedDshProcess?
     private let lock = NSLock()
-    private var isRestarting = false
+    private var processRecordURL: URL {
+        DshStateManager.appSupportDirectory.appendingPathComponent("dsh-service-process.json")
+    }
 
     public enum ServiceError: Error, LocalizedError {
         case dshEntryNotFound
@@ -67,6 +82,12 @@ public final class DshService: @unchecked Sendable {
         // the old service can make its own restart look like an external
         // conflict.
         await stopAndWait()
+        // A hard kill (crash, kill -9, or an app-level kill during quit) can
+        // leave the previous DSH web server holding the port because
+        // applicationWillTerminate never ran. Reclaim only the process
+        // recorded by this app before probing so an orphaned child process
+        // never blocks this launch without killing an unrelated DSH instance.
+        recycleStaleDshServerIfNeeded(onPort: actualPort)
         let portDeadline = Date().addingTimeInterval(3.0)
         while !isPortAvailable(actualPort), Date() < portDeadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -105,9 +126,26 @@ public final class DshService: @unchecked Sendable {
         } catch {
             throw ServiceError.startupFailed(error.localizedDescription)
         }
-        process = proc
+        // Put the child into its own process group so a single kill(-pgid) can
+        // reach node and any subprocesses DSH forked; killing only the direct
+        // pid leaves the actual web worker alive and holding the port.
+        let hasProcessGroup = makeProcessGroupLeader(proc)
+        let processGroupID = hasProcessGroup ? proc.processIdentifier : nil
+        setProcess(ManagedDshProcess(process: proc, hasProcessGroup: hasProcessGroup))
+        saveProcessRecord(DshProcessRecord(
+            pid: proc.processIdentifier,
+            port: actualPort,
+            nodePath: nodePath,
+            entryPath: entry,
+            processGroupID: processGroupID
+        ))
 
-        let waiter = ProcessWaiter(proc: proc, stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+        let waiter = ProcessWaiter(
+            proc: proc,
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            hasProcessGroup: hasProcessGroup
+        )
         return try await waiter.wait()
     }
 
@@ -143,42 +181,173 @@ public final class DshService: @unchecked Sendable {
     }
 
     public func stop() {
-        let proc = takeProcess()
-        guard let proc, proc.isRunning else { return }
-        proc.terminationHandler = nil
-        proc.terminate()
-        let pid = proc.processIdentifier
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) {
-            kill(pid, SIGKILL)
+        let managed = takeProcess()
+        guard let managed,
+              managed.process.isRunning || managed.hasProcessGroup else { return }
+        managed.process.terminationHandler = nil
+        signalManagedProcess(managed, SIGTERM)
+        // This runs from applicationWillTerminate. The old code scheduled SIGKILL
+        // on a background queue 3 seconds later; once the app exits that delayed
+        // callback never fires, leaving `node bin.js --profile web` alive and the
+        // port occupied. Escalate here, synchronously, so quitting never orphans
+        // the server. Keep the grace short so Cmd+Q stays responsive.
+        let deadline = Date().addingTimeInterval(0.6)
+        while managed.process.isRunning, Date() < deadline {
+            usleep(50_000)
         }
+        signalManagedProcess(managed, SIGKILL)
     }
 
     private func stopAndWait() async {
-        let proc = takeProcess()
+        let managed = takeProcess()
 
-        guard let proc, proc.isRunning else { return }
-        proc.terminationHandler = nil
-        proc.terminate()
+        guard let managed,
+              managed.process.isRunning || managed.hasProcessGroup else { return }
+        managed.process.terminationHandler = nil
+        signalManagedProcess(managed, SIGTERM)
 
         let deadline = Date().addingTimeInterval(3.0)
-        while proc.isRunning, Date() < deadline {
+        while managed.process.isRunning, Date() < deadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
 
-        if proc.isRunning {
-            kill(proc.processIdentifier, SIGKILL)
-            while proc.isRunning, Date() < deadline.addingTimeInterval(1.0) {
-                try? await Task.sleep(nanoseconds: 50_000_000)
+        signalManagedProcess(managed, SIGKILL)
+    }
+
+    private func makeProcessGroupLeader(_ proc: Process) -> Bool {
+        let pid = proc.processIdentifier
+        // setpgid can race with the child's exec; retry briefly so the child
+        // lands in its own process group and `kill(-pid)` can reach its subtree.
+        for _ in 0..<5 {
+            if setpgid(pid, pid) == 0 { return true }
+            usleep(10_000)
+        }
+        return false
+    }
+
+    /// Signal the managed process without falling back to a potentially reused
+    /// PID after the direct child has exited. A surviving process group can
+    /// still contain the web worker, so it remains safe to signal that group.
+    private func signalManagedProcess(_ managed: ManagedDshProcess, _ signal: Int32) {
+        let pid = managed.process.processIdentifier
+        if managed.hasProcessGroup {
+            if kill(-pid, signal) != 0, managed.process.isRunning {
+                _ = kill(pid, signal)
             }
+        } else if managed.process.isRunning {
+            _ = kill(pid, signal)
         }
     }
 
-    private func takeProcess() -> Process? {
+    /// Reclaim a port still held by this app's stale DSH web server after a
+    /// hard kill. The record scopes recovery to the exact PID and, when
+    /// available, the exact process group created for this app.
+    private func recycleStaleDshServerIfNeeded(onPort port: Int) {
+        guard !isPortAvailable(port),
+              let record = loadProcessRecord(),
+              record.port == port else { return }
+
+        let listeners = listeningPids(on: port)
+        guard listeners.contains(where: { isRecordedDshServer(pid: $0, record: record) }) else {
+            return
+        }
+
+        terminateRecordedProcess(record)
+    }
+
+    private func terminateRecordedProcess(_ record: DshProcessRecord) {
+        let pid = pid_t(record.pid)
+        if let groupID = record.processGroupID {
+            _ = kill(-pid_t(groupID), SIGTERM)
+        } else if isRecordedDshServer(pid: pid, record: record) {
+            _ = kill(pid, SIGTERM)
+        }
+
+        usleep(150_000)
+
+        // Never fall back to a direct kill after the group leader has gone
+        // away. If the group no longer exists, its members are gone too; a
+        // direct kill at this point could hit a recycled PID.
+        if let groupID = record.processGroupID {
+            _ = kill(-pid_t(groupID), SIGKILL)
+        } else if isRecordedDshServer(pid: pid, record: record) {
+            _ = kill(pid, SIGKILL)
+        }
+    }
+
+    /// Verify that a recorded PID still carries this app's DSH command line.
+    /// A PID alone is not ownership: it can be reused after a process exits.
+    private func isRecordedDshServer(pid: pid_t, record: DshProcessRecord) -> Bool {
+        guard let command = processCommandLine(pid) else { return false }
+        if pid == pid_t(record.pid) {
+            return command.contains(record.nodePath)
+                && command.contains(record.entryPath)
+                && command.contains("--profile web")
+                && command.contains("--host 127.0.0.1")
+                && command.contains("--port \(record.port)")
+        }
+
+        guard let groupID = record.processGroupID else { return false }
+        return getpgid(pid) == pid_t(groupID)
+    }
+
+    private func processCommandLine(_ pid: pid_t) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-ww", "-p", String(pid), "-o", "command="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        guard (try? proc.run()) != nil else { return nil }
+        proc.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return text.isEmpty ? nil : text
+    }
+
+    private func listeningPids(on port: Int) -> [pid_t] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        proc.arguments = ["-ti", ":\(port)"]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = FileHandle.nullDevice
+        guard (try? proc.run()) != nil else { return [] }
+        proc.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        return text
+            .split(whereSeparator: \.isNewline)
+            .compactMap { pid_t($0.trimmingCharacters(in: .whitespaces)) }
+    }
+
+    private func loadProcessRecord() -> DshProcessRecord? {
+        guard let data = try? Data(contentsOf: processRecordURL) else { return nil }
+        return try? JSONDecoder().decode(DshProcessRecord.self, from: data)
+    }
+
+    private func saveProcessRecord(_ record: DshProcessRecord) {
+        do {
+            let data = try JSONEncoder().encode(record)
+            try data.write(to: processRecordURL, options: .atomic)
+        } catch {
+            print("[DshService] Failed to save process record:", error)
+        }
+    }
+
+    private func takeProcess() -> ManagedDshProcess? {
         lock.lock()
         defer { lock.unlock() }
         let proc = process
         process = nil
         return proc
+    }
+
+    private func setProcess(_ managed: ManagedDshProcess) {
+        lock.lock()
+        process = managed
+        lock.unlock()
     }
 }
 
@@ -186,6 +355,7 @@ private final class ProcessWaiter: @unchecked Sendable {
     private let proc: Process
     private let stdoutPipe: Pipe
     private let stderrPipe: Pipe
+    private let hasProcessGroup: Bool
     private let lock = NSLock()
     private var output = ""
     private var settled = false
@@ -196,10 +366,11 @@ private final class ProcessWaiter: @unchecked Sendable {
         pattern: #"dsh web: (http://127\.0\.0\.1:\d+)\b"#
     )
 
-    init(proc: Process, stdoutPipe: Pipe, stderrPipe: Pipe) {
+    init(proc: Process, stdoutPipe: Pipe, stderrPipe: Pipe, hasProcessGroup: Bool) {
         self.proc = proc
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
+        self.hasProcessGroup = hasProcessGroup
     }
 
     func wait() async throws -> URL {
@@ -208,7 +379,14 @@ private final class ProcessWaiter: @unchecked Sendable {
 
             let timeoutTask = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
-                self.proc.terminate()
+                let pid = self.proc.processIdentifier
+                if self.hasProcessGroup {
+                    _ = kill(-pid, SIGTERM)
+                    _ = kill(-pid, SIGKILL)
+                } else if self.proc.isRunning {
+                    _ = kill(pid, SIGTERM)
+                    _ = kill(pid, SIGKILL)
+                }
                 self.lock.lock()
                 let currentOutput = self.output.isEmpty ? "等待 60 秒后超时。" : self.output
                 self.lock.unlock()
