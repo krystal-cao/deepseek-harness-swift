@@ -3,4 +3,5 @@ dist/
 assets/node/
 assets/bin/pnpm-pkg/
 DSH.xcodeproj/**/xcuserdata/
+.vscode/
 .DS_Store
