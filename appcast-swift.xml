@@ -2,13 +2,13 @@
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
     <channel>
         <title>DSH Swift Updates</title>
-        <link>https://github.com/krystal-cao/deepseek-harness-swift/releases</link>
+        <link>https://github.com/summer-521/deepseek-harness-swift/releases</link>
         <description>Updates for the native Swift shell of DSH Desktop.</description>
         <language>zh-CN</language>
         <item>
             <title>1.0.0</title>
             <pubDate>Thu, 27 Aug 2026 10:03:27 +0800</pubDate>
-            <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
+            <link>https://github.com/summer-521/deepseek-harness-swift/releases/tag/v1.0.0</link>
             <sparkle:version>7</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
@@ -48,12 +48,12 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="53178473" type="application/octet-stream" sparkle:edSignature="p8hx9UZx2dJg6Cc7JSLQbYP3p8qvayvXxHrKbV3laBEU2eaEcY+g0hEYViZD69yFP9aeWhgMBbj7zv4FyMzGCw=="/>
+            <enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="53178473" type="application/octet-stream" sparkle:edSignature="p8hx9UZx2dJg6Cc7JSLQbYP3p8qvayvXxHrKbV3laBEU2eaEcY+g0hEYViZD69yFP9aeWhgMBbj7zv4FyMzGCw=="/>
         </item>
         <item>
             <title>1.0.0</title>
             <pubDate>Thu, 27 Aug 2026 10:03:27 +0800</pubDate>
-            <link>https://github.com/krystal-cao/deepseek-harness-swift/releases/tag/v1.0.0</link>
+            <link>https://github.com/summer-521/deepseek-harness-swift/releases/tag/v1.0.0</link>
             <sparkle:version>7</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
@@ -93,7 +93,7 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="54494455" type="application/octet-stream" sparkle:edSignature="Roh1CPhdrSCVaaQeVpN7V7uFuJlcQK13q5WDfcoRuDbh/TZHr/4vJYLzBQzPknK6A2X2g1tubFiWInTzKpmZDw=="/>
+            <enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="54494455" type="application/octet-stream" sparkle:edSignature="Roh1CPhdrSCVaaQeVpN7V7uFuJlcQK13q5WDfcoRuDbh/TZHr/4vJYLzBQzPknK6A2X2g1tubFiWInTzKpmZDw=="/>
         </item>
     </channel>
 </rss>

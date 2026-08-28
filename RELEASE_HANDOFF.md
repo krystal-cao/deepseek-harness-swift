@@ -6,12 +6,12 @@
 
 ## 1. 项目边界
 
-- 仓库：<https://github.com/krystal-cao/deepseek-harness-swift>
+- 仓库：<https://github.com/summer-521/deepseek-harness-swift>
 - 工程：`DSH.xcodeproj`
 - 支持系统：macOS 13+
 - 支持架构：`arm64`（Apple Silicon）和 `x86_64`（Intel）
 - 当前版本配置：`Version.xcconfig`
-- 当前更新源：<https://raw.githubusercontent.com/krystal-cao/deepseek-harness-swift/main/appcast-swift.xml>
+- 当前更新源：<https://raw.githubusercontent.com/summer-521/deepseek-harness-swift/main/appcast-swift.xml>
 - GitHub Release 资产目录：`v$SWIFT_APP_VERSION`
 
 这是独立的 Swift 原生项目，不依赖 Electron 仓库，也不需要执行 `npm install` 或 `npm ci` 来准备应用构建依赖。`package.json` 仅提供不依赖第三方 npm 包的源代码测试命令。
@@ -72,7 +72,7 @@ gh auth status
 后续命令默认使用：
 
 ```bash
-REPO="krystal-cao/deepseek-harness-swift"
+REPO="summer-521/deepseek-harness-swift"
 ```
 
 ### 3.3 Sparkle 签名工具和 Keychain
@@ -276,7 +276,7 @@ Sparkle 的 DMG 签名和 macOS ad-hoc codesign 是两套不同的签名：
 `Info.plist` 中的 `SUFeedURL` 固定指向：
 
 ```text
-https://raw.githubusercontent.com/krystal-cao/deepseek-harness-swift/main/appcast-swift.xml
+https://raw.githubusercontent.com/summer-521/deepseek-harness-swift/main/appcast-swift.xml
 ```
 
 每个架构各有一个 `<item>`。更新发布时需要同步修改以下字段：
@@ -287,7 +287,7 @@ https://raw.githubusercontent.com/krystal-cao/deepseek-harness-swift/main/appcas
 <sparkle:version>2</sparkle:version>
 <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
 <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-<enclosure url="https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="这里填 sign_update 输出的字节数" type="application/octet-stream" sparkle:edSignature="这里填 sign_update 输出的签名"/>
+<enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="这里填 sign_update 输出的字节数" type="application/octet-stream" sparkle:edSignature="这里填 sign_update 输出的签名"/>
 ```
 
 x86_64 条目使用 `<sparkle:hardwareRequirements>x86_64</sparkle:hardwareRequirements>` 和 x64 DMG 的签名、大小。
@@ -332,7 +332,7 @@ xmllint --noout appcast-swift.xml
 ```bash
 APP_VERSION="1.0.1"
 TAG="v$APP_VERSION"
-REPO="krystal-cao/deepseek-harness-swift"
+REPO="summer-521/deepseek-harness-swift"
 
 git add Version.xcconfig appcast-swift.xml Sources README.md
 git commit -m "release: publish $TAG"
@@ -347,7 +347,7 @@ gh release create "$TAG" dist/DSH-Desktop-$APP_VERSION-arm64.dmg dist/DSH-Deskto
 如果 Release 已经存在、只是同一个版本重新生成了同名 DMG（例如当前 `v1.0.0` 的 build 2 替换 build 1），使用：
 
 ```bash
-gh release upload v1.0.0 dist/DSH-Desktop-1.0.0-arm64.dmg dist/DSH-Desktop-1.0.0-x64.dmg --repo krystal-cao/deepseek-harness-swift --clobber
+gh release upload v1.0.0 dist/DSH-Desktop-1.0.0-arm64.dmg dist/DSH-Desktop-1.0.0-x64.dmg --repo summer-521/deepseek-harness-swift --clobber
 ```
 
 `--clobber` 会替换同名资产。替换资产后，appcast 中的 `length` 和 `sparkle:edSignature` 也必须对应替换后的文件。
@@ -375,7 +375,7 @@ gh release view "$TAG" --repo "$REPO"
 首先确认两个 Release 资产的大小：
 
 ```bash
-gh release view v1.0.0 --repo krystal-cao/deepseek-harness-swift --json assets
+gh release view v1.0.0 --repo summer-521/deepseek-harness-swift --json assets
 ```
 
 确认 `size` 与 appcast 中的 `length` 一致。
@@ -383,14 +383,14 @@ gh release view v1.0.0 --repo krystal-cao/deepseek-harness-swift --json assets
 确认更新源已经包含最新 build：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/krystal-cao/deepseek-harness-swift/main/appcast-swift.xml
+curl -fsSL https://raw.githubusercontent.com/summer-521/deepseek-harness-swift/main/appcast-swift.xml
 ```
 
 确认下载 URL 可访问并返回正确的文件大小：
 
 ```bash
-curl -sSIL -L --max-redirs 3 https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg
-curl -sSIL -L --max-redirs 3 https://github.com/krystal-cao/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg
+curl -sSIL -L --max-redirs 3 https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg
+curl -sSIL -L --max-redirs 3 https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg
 ```
 
 最终安装测试时，建议：

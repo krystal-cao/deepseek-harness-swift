@@ -134,7 +134,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func openHelp() {
-        if let url = URL(string: "https://github.com/krystal-cao/deepseek-harness-desktop") {
+        if let url = URL(string: "https://github.com/summer-521/deepseek-harness-desktop") {
             NSWorkspace.shared.open(url)
         }
     }
