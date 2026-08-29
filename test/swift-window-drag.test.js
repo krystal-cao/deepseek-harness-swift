@@ -7,6 +7,10 @@ const MAIN_WINDOW_SOURCE = fs.readFileSync(
   new URL('../Sources/MainWindow/MainWindowController.swift', import.meta.url),
   'utf8',
 )
+const WEB_SHELL_SOURCE = fs.readFileSync(
+  new URL('../Sources/MainWindow/DshWebShell.swift', import.meta.url),
+  'utf8',
+)
 const BRIDGE_SOURCE = fs.readFileSync(
   new URL('../Sources/Bridge/DshBridgeHandler.swift', import.meta.url),
   'utf8',
@@ -15,7 +19,7 @@ const BUILD_SOURCE = fs.readFileSync(
   new URL('../scripts/build-app.sh', import.meta.url),
   'utf8',
 )
-const WINDOW_DRAG_SCRIPT_MATCH = MAIN_WINDOW_SOURCE.match(
+const WINDOW_DRAG_SCRIPT_MATCH = WEB_SHELL_SOURCE.match(
   /private static let windowDragScript = """\n([\s\S]*?)\n    """/,
 )
 assert.ok(WINDOW_DRAG_SCRIPT_MATCH)
@@ -90,21 +94,21 @@ function mouseEvent(target, overrides = {}) {
 test('Swift titlebar leaves WebKit in charge of every click', () => {
   assert.doesNotMatch(MAIN_WINDOW_SOURCE, /dragOverlay|CustomDragView/)
   assert.doesNotMatch(BUILD_SOURCE, /CustomDragView/)
-  assert.match(MAIN_WINDOW_SOURCE, /event\.clientY > titlebarHeight/)
-  assert.match(MAIN_WINDOW_SOURCE, /isInteractive\(event\.target\)/)
-  assert.match(MAIN_WINDOW_SOURCE, /Math\.hypot/)
-  assert.match(MAIN_WINDOW_SOURCE, /if \(distance < dragThreshold\) return/)
-  assert.match(MAIN_WINDOW_SOURCE, /event\.preventDefault\(\);\n        candidate =/)
-  assert.match(MAIN_WINDOW_SOURCE, /html\.dsh-native-window-drag/)
-  assert.match(MAIN_WINDOW_SOURCE, /\.dsh-native-window-drag-hover/)
-  assert.match(MAIN_WINDOW_SOURCE, /cursor: default !important/)
-  assert.match(MAIN_WINDOW_SOURCE, /user-select: none !important/)
-  assert.match(MAIN_WINDOW_SOURCE, /forMainFrameOnly: true/)
+  assert.match(WEB_SHELL_SOURCE, /event\.clientY > titlebarHeight/)
+  assert.match(WEB_SHELL_SOURCE, /isInteractive\(event\.target\)/)
+  assert.match(WEB_SHELL_SOURCE, /Math\.hypot/)
+  assert.match(WEB_SHELL_SOURCE, /if \(distance < dragThreshold\) return/)
+  assert.match(WEB_SHELL_SOURCE, /event\.preventDefault\(\);\n        candidate =/)
+  assert.match(WEB_SHELL_SOURCE, /html\.dsh-native-window-drag/)
+  assert.match(WEB_SHELL_SOURCE, /\.dsh-native-window-drag-hover/)
+  assert.match(WEB_SHELL_SOURCE, /cursor: default !important/)
+  assert.match(WEB_SHELL_SOURCE, /user-select: none !important/)
+  assert.match(WEB_SHELL_SOURCE, /forMainFrameOnly: true/)
 })
 
 test('Swift bridge carries the complete native window drag lifecycle', () => {
   for (const type of ['windowDragPrepare', 'windowDragStart', 'windowDragMove', 'windowDragEnd']) {
-    assert.match(MAIN_WINDOW_SOURCE, new RegExp(`post\\('${type}'\\)`))
+    assert.match(WEB_SHELL_SOURCE, new RegExp(`post\\('${type}'\\)`))
     assert.match(BRIDGE_SOURCE, new RegExp(`case "${type}"`))
   }
   assert.match(MAIN_WINDOW_SOURCE, /window\.performDrag\(with: mouseDownEvent\)/)
@@ -114,7 +118,7 @@ test('Swift bridge carries the complete native window drag lifecycle', () => {
 })
 
 test('Swift titlebar double-click follows native zoom or minimize behavior', () => {
-  assert.match(MAIN_WINDOW_SOURCE, /post\('windowTitlebarDoubleClick'\)/)
+  assert.match(WEB_SHELL_SOURCE, /post\('windowTitlebarDoubleClick'\)/)
   assert.match(BRIDGE_SOURCE, /case "windowTitlebarDoubleClick"/)
   assert.match(MAIN_WINDOW_SOURCE, /AppleActionOnDoubleClick/)
   assert.match(MAIN_WINDOW_SOURCE, /window\.performMiniaturize\(nil\)/)

@@ -1,6 +1,6 @@
 // Swift shell release metadata. Keep this independent from Electron's package.json.
 SWIFT_APP_VERSION = 1.0.0
-SWIFT_APP_BUILD = 7
+SWIFT_APP_BUILD = 8
 MARKETING_VERSION = $(SWIFT_APP_VERSION)
 CURRENT_PROJECT_VERSION = $(SWIFT_APP_BUILD)
 

@@ -34,6 +34,7 @@
 		E00000000000000000000024 /* UserNotifications.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D00000000000000000000033 /* UserNotifications.framework */; };
 		E00000000000000000000025 /* AppUpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000045 /* AppUpdateManager.swift */; };
 		E00000000000000000000026 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D00000000000000000000047 /* Sparkle */; };
+		E00000000000000000000027 /* DshWebShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000050 /* DshWebShell.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -66,6 +67,7 @@
 		D00000000000000000000033 /* UserNotifications.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UserNotifications.framework; path = System/Library/Frameworks/UserNotifications.framework; sourceTree = SDKROOT; };
 		D00000000000000000000044 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
 		D00000000000000000000045 /* AppUpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateManager.swift; sourceTree = "<group>"; };
+		D00000000000000000000050 /* DshWebShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshWebShell.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -195,6 +197,7 @@
 			isa = PBXGroup;
 			children = (
 				D00000000000000000000022 /* MainWindowController.swift */,
+				D00000000000000000000050 /* DshWebShell.swift */,
 			);
 			path = MainWindow;
 			sourceTree = "<group>";
@@ -346,6 +349,7 @@
 				E00000000000000000000019 /* SettingsView.swift in Sources */,
 				E00000000000000000000020 /* SettingsWindowController.swift in Sources */,
 				E00000000000000000000025 /* AppUpdateManager.swift in Sources */,
+				E00000000000000000000027 /* DshWebShell.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

@@ -94,6 +94,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(withTitle: "重新加载页面", action: #selector(reloadPage), keyEquivalent: "R")
         viewMenu.addItem(NSMenuItem.separator())
         viewMenu.addItem(withTitle: "进入全屏幕", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+#if DEBUG
+        viewMenu.addItem(NSMenuItem.separator())
+        viewMenu.addItem(withTitle: "启用开发者工具", action: #selector(MainWindowController.enableDeveloperTools), keyEquivalent: "")
+        viewMenu.addItem(withTitle: "关闭开发者工具", action: #selector(MainWindowController.closeDeveloperTools), keyEquivalent: "")
+#endif
         viewMenuItem.submenu = viewMenu
         mainMenu.addItem(viewMenuItem)
 

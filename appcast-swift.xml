@@ -7,9 +7,9 @@
         <language>zh-CN</language>
         <item>
             <title>1.0.0</title>
-            <pubDate>Thu, 27 Aug 2026 10:03:27 +0800</pubDate>
+            <pubDate>Sat, 29 Aug 2026 19:12:10 +0800</pubDate>
             <link>https://github.com/summer-521/deepseek-harness-swift/releases/tag/v1.0.0</link>
-            <sparkle:version>7</sparkle:version>
+            <sparkle:version>8</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
@@ -48,13 +48,13 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="53178473" type="application/octet-stream" sparkle:edSignature="p8hx9UZx2dJg6Cc7JSLQbYP3p8qvayvXxHrKbV3laBEU2eaEcY+g0hEYViZD69yFP9aeWhgMBbj7zv4FyMzGCw=="/>
+            <enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-arm64.dmg" length="53403233" type="application/octet-stream" sparkle:edSignature="UBLftKHbcxPbKCfCIdzdc5ZppnSkzC0pG8EnPXTyrpHTKbusFDoesV0VxddxkZZyadOHgAaxhuvjHcRV/EZ8DA=="/>
         </item>
         <item>
             <title>1.0.0</title>
-            <pubDate>Thu, 27 Aug 2026 10:03:27 +0800</pubDate>
+            <pubDate>Sat, 29 Aug 2026 19:12:10 +0800</pubDate>
             <link>https://github.com/summer-521/deepseek-harness-swift/releases/tag/v1.0.0</link>
-            <sparkle:version>7</sparkle:version>
+            <sparkle:version>8</sparkle:version>
             <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>x86_64</sparkle:hardwareRequirements>
@@ -93,7 +93,7 @@
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - Swift 应用包更新与 DSH npm 运行时更新是两套独立流程。
 ]]></description>
-            <enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="54494455" type="application/octet-stream" sparkle:edSignature="Roh1CPhdrSCVaaQeVpN7V7uFuJlcQK13q5WDfcoRuDbh/TZHr/4vJYLzBQzPknK6A2X2g1tubFiWInTzKpmZDw=="/>
+            <enclosure url="https://github.com/summer-521/deepseek-harness-swift/releases/download/v1.0.0/DSH-Desktop-1.0.0-x64.dmg" length="54631111" type="application/octet-stream" sparkle:edSignature="tKVHYWEBkSoZhJbfwUvXoK2bpZCgzxg71nuvRWISjeK3RPnAbrpFTnc6H2I+99L22+HhIjSSGRzI7ixYcah0CA=="/>
         </item>
     </channel>
 </rss>

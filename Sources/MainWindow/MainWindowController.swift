@@ -105,7 +105,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
 
     private var webView: WKWebView?
     private var vibrancyView: NSVisualEffectView?
-    private var bridgeHandler = DshBridgeHandler()
+    private var webShell: DshWebShell?
     private var onboardingHostingView: NSView?
     private var webUIReadinessGeneration = 0
     private var windowDragMouseDownEvent: NSEvent?
@@ -115,221 +115,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var downloadStatusBanner: DownloadStatusBanner?
 
-    private static let titlebarCSS = """
-    [class*="sidebarCol"] {
-      padding-top: 40px !important;
-      min-width: 88px !important;
-      background: color-mix(in srgb, var(--dsw-specific-sidebar-fill) 70%, transparent) !important;
-    }
-    [data-sidebar-collapsed] {
-      grid-template-columns: 88px minmax(0px, 1fr) 0px !important;
-    }
-    html, body { background: transparent !important; }
-    [class*="frame"]:has(> [class*="sidebarCol"]) { background: transparent !important; }
-    [class*="centerCol"], [class*="detailsCol"] {
-      background: var(--dsw-alias-bg-base) !important;
-    }
-    [class*="sidebarCol"] [class*="_root"],
-    [class*="sidebarCol"] [class*="listArea"] { background: transparent !important; }
-    [class*="sidebarCol"] [class*="footArea"],
-    [class*="sidebarCol"] [class*="footerActions"],
-    [class*="sidebarCol"] [class*="settingsArea"],
-    [class*="sidebarCol"] [class*="fade"] { background: transparent !important; }
-    [class*="railIn"] [class*="iconButton"],
-    [class*="railIn"] [class*="newSession"],
-    [class*="railIn"] [class*="searchButton"],
-    [class*="railIn"] [class*="headerActions"],
-    [class*="railIn"] [class*="search"] {
-      margin-left: auto !important;
-      margin-right: auto !important;
-    }
-    html.dsh-native-window-drag,
-    html.dsh-native-window-drag * {
-      cursor: default !important;
-      -webkit-user-select: none !important;
-      user-select: none !important;
-    }
-    .dsh-native-window-drag-hover,
-    .dsh-native-window-drag-hover * {
-      cursor: default !important;
-    }
-    """
-
-    private static let hideLoadingCSS = """
-    #dsh-plugin-loading-overlay, [class*="pluginLoading"] {
-      display: none !important;
-    }
-    """
-
-    /// Keep WebKit in charge of hit testing across the entire titlebar. A
-    /// native overlay used to swallow every click in the top 70 points. This
-    /// script starts a native window drag only after the pointer moves beyond
-    /// a small threshold from non-interactive titlebar content.
-    private static let windowDragScript = """
-    (() => {
-      if (window.__DSH_NATIVE_WINDOW_DRAG_INSTALLED__) return;
-      window.__DSH_NATIVE_WINDOW_DRAG_INSTALLED__ = true;
-
-      const titlebarHeight = 70;
-      const dragThreshold = 4;
-      const interactiveSelector = [
-        'a[href]',
-        'button',
-        'input',
-        'select',
-        'textarea',
-        'summary',
-        '[role="button"]',
-        '[role="tab"]',
-        '[role="menuitem"]',
-        '[role="switch"]',
-        '[contenteditable]:not([contenteditable="false"])',
-        '[tabindex]:not([tabindex="-1"])'
-      ].join(',');
-      let candidate = null;
-      let dragging = false;
-      let suppressClick = false;
-      let suppressTitlebarSelection = false;
-      let hoverElement = null;
-
-      const post = (type) => {
-        window.webkit?.messageHandlers?.dshDesktop?.postMessage({ type });
-      };
-      const isInteractive = (target) => {
-        if (!(target instanceof Element)) return false;
-        if (target.closest(interactiveSelector)) return true;
-
-        let current = target;
-        while (current && current !== document.documentElement) {
-          const cursor = window.getComputedStyle(current).cursor;
-          if (cursor && cursor !== 'auto' && cursor !== 'default') return true;
-          current = current.parentElement;
-        }
-        return false;
-      };
-      const isTextEditingTarget = (target) => {
-        if (!(target instanceof Element)) return false;
-        return Boolean(target.closest(
-          'input, textarea, [contenteditable]:not([contenteditable="false"])'
-        ));
-      };
-      const setDragSurfaceActive = (active) => {
-        document.documentElement.classList.toggle('dsh-native-window-drag', active);
-      };
-      const clearHoverElement = () => {
-        hoverElement?.classList.remove('dsh-native-window-drag-hover');
-        hoverElement = null;
-      };
-      const updateTitlebarHover = (event) => {
-        // Remove the old override before checking computed cursor styles so a
-        // custom pointer-cursor control can still be recognized as interactive.
-        clearHoverElement();
-        if (candidate || event.clientY > titlebarHeight || isInteractive(event.target)) return;
-        if (!(event.target instanceof Element)) return;
-        hoverElement = event.target;
-        hoverElement.classList.add('dsh-native-window-drag-hover');
-      };
-      const reset = () => {
-        candidate = null;
-        dragging = false;
-        setDragSurfaceActive(false);
-      };
-      window.__DSH_NATIVE_WINDOW_DRAG_CLEANUP__ = reset;
-
-      document.addEventListener('mousedown', (event) => {
-        // A prevented mouseup may not be followed by a click event in every
-        // WebKit version, so never carry click suppression into a new gesture.
-        suppressClick = false;
-        clearHoverElement();
-        suppressTitlebarSelection = event.clientY <= titlebarHeight && !isTextEditingTarget(event.target);
-        setDragSurfaceActive(false);
-        if (event.button !== 0 || event.clientY > titlebarHeight || isInteractive(event.target)) {
-          candidate = null;
-          return;
-        }
-        // Stop WebKit from beginning a text selection or showing an I-beam
-        // before the movement threshold promotes this gesture to a window drag.
-        event.preventDefault();
-        candidate = { x: event.screenX, y: event.screenY };
-        setDragSurfaceActive(true);
-        post('windowDragPrepare');
-      }, { capture: true, passive: false });
-
-      document.addEventListener('mousemove', (event) => {
-        updateTitlebarHover(event);
-        if (!candidate) return;
-        if (!dragging) {
-          const distance = Math.hypot(event.screenX - candidate.x, event.screenY - candidate.y);
-          if (distance < dragThreshold) return;
-          dragging = true;
-          suppressClick = true;
-          post('windowDragStart');
-        }
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        post('windowDragMove');
-      }, { capture: true, passive: false });
-
-      document.addEventListener('mouseup', (event) => {
-        suppressTitlebarSelection = false;
-        if (!candidate) return;
-        if (dragging) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          post('windowDragEnd');
-        }
-        reset();
-        updateTitlebarHover(event);
-      }, { capture: true, passive: false });
-
-      document.addEventListener('click', (event) => {
-        if (!suppressClick) return;
-        suppressClick = false;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-      }, true);
-
-      document.addEventListener('selectstart', (event) => {
-        if (!suppressTitlebarSelection) return;
-        event.preventDefault();
-      }, { capture: true, passive: false });
-
-      document.addEventListener('dblclick', (event) => {
-        clearHoverElement();
-        if (event.button !== 0 || event.clientY > titlebarHeight || isInteractive(event.target)) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        window.getSelection?.()?.removeAllRanges();
-        post('windowTitlebarDoubleClick');
-      }, true);
-
-      window.addEventListener('blur', () => {
-        if (dragging) post('windowDragEnd');
-        suppressClick = false;
-        suppressTitlebarSelection = false;
-        clearHoverElement();
-        reset();
-      });
-      document.addEventListener('mouseleave', clearHoverElement, true);
-    })();
-    """
-
-    private static let webUIReadyScript = """
-    (() => {
-      const body = document.body;
-      const text = body && typeof body.textContent === 'string'
-        ? body.textContent.trim()
-        : '';
-      const hasAppShell = Boolean(document.querySelector(
-        '[class*="sidebarCol"], [class*="railIn"], [class*="centerCol"]'
-      ));
-      return {
-        loading: text.includes('Loading plugins') || text.includes('加载插件'),
-        length: text.length,
-        hasAppShell
-      };
-    })();
-    """
 
     private init() {
         let win = NSWindow(
@@ -356,6 +141,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             closeButton.action = #selector(hideMainWindow)
         }
         setupContentView(in: win)
+        adjustTrafficLights(in: win)
         // NSWindow can become visible as soon as the application activates.
         // Keep the main window explicitly hidden until the DSH page has
         // finished rendering; otherwise the user sees a blank/boot screen
@@ -367,67 +153,30 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// The full-size transparent content view makes AppKit place the traffic
+    /// lights too close to the physical top edge. Match the vertical rhythm
+    /// of normal macOS titlebars while keeping the content visually fused.
+    private func adjustTrafficLights(in win: NSWindow) {
+        win.layoutIfNeeded()
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = win.standardWindowButton(type) else { continue }
+            var frame = button.frame
+            frame.origin.x += 7
+            frame.origin.y -= 8
+            button.frame = frame
+        }
+    }
+
     private func setupContentView(in win: NSWindow) {
-        let bounds = win.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 1440, height: 960)
-
-        // 1. Vibrancy sidebar background
-        let vibrancy = NSVisualEffectView(frame: bounds)
-        vibrancy.material = .sidebar
-        vibrancy.blendingMode = .behindWindow
-        vibrancy.state = .followsWindowActiveState
-        vibrancy.autoresizingMask = [.width, .height]
-        self.vibrancyView = vibrancy
-
-        // 2. WKWebView Configuration
-        let config = WKWebViewConfiguration()
-        config.preferences.setValue(true, forKey: "developerExtrasEnabled")
-
-        let userContent = WKUserContentController()
-        bridgeHandler.delegate = self
-        userContent.add(bridgeHandler, name: "dshDesktop")
-
-        // Pre-inject Bridge API
-        let bridgeScript = WKUserScript(
-            source: DshBridgeHandler.scriptSource,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
+        let shell = DshWebShell(
+            delegate: self
         )
-        userContent.addUserScript(bridgeScript)
-
-        let windowDragUserScript = WKUserScript(
-            source: Self.windowDragScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: true
-        )
-        userContent.addUserScript(windowDragUserScript)
-
-        // Pre-inject CSS styles at document start
-        let styleScript = """
-        (function() {
-          const style = document.createElement('style');
-          style.id = 'dsh-shell-styles';
-          style.textContent = `\(Self.titlebarCSS)\n\(Self.hideLoadingCSS)`;
-          (document.head || document.documentElement).appendChild(style);
-        })();
-        """
-        let cssUserScript = WKUserScript(
-            source: styleScript,
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
-        )
-        userContent.addUserScript(cssUserScript)
-
-        config.userContentController = userContent
-
-        let wv = WKWebView(frame: bounds, configuration: config)
-        wv.navigationDelegate = self
-        wv.uiDelegate = self
-        wv.autoresizingMask = [.width, .height]
-        wv.setValue(false, forKey: "drawsBackground")
-        self.webView = wv
-
-        vibrancy.addSubview(wv)
-        win.contentView = vibrancy
+        shell.webView.navigationDelegate = self
+        shell.webView.uiDelegate = self
+        self.webShell = shell
+        self.webView = shell.webView
+        self.vibrancyView = shell.rootView
+        win.contentView = shell.rootView
     }
 
     // MARK: - App Launch & Initialization
@@ -510,7 +259,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                   self.webUIReadinessGeneration == generation,
                   let webView = self.webView else { return }
 
-            webView.evaluateJavaScript(Self.webUIReadyScript) { [weak self] result, _ in
+            webView.evaluateJavaScript(DshWebShell.webUIReadinessScript) { [weak self] result, _ in
                 DispatchQueue.main.async {
                     guard let self,
                           self.webUIReadinessGeneration == generation else { return }
@@ -626,27 +375,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     public func syncUiTheme() {
         let externalTheme = DshPluginManager.shared.detectExternalTheme()
         let theme = externalTheme == nil ? DshStateManager.shared.current.uiTheme : "default"
-        let serialized = (theme == "claude") ? "\"claude\"" : "\"default\""
-        let script = """
-        (() => {
-          const theme = \(serialized);
-          window.__DSH_DESKTOP_UI_THEME__ = theme;
-          window.dispatchEvent(new CustomEvent('dsh-desktop-ui-theme-change', { detail: { theme } }));
-        })();
-        """
-        webView?.evaluateJavaScript(script, completionHandler: nil)
+        webShell?.syncTheme(theme)
     }
 
     public func syncTranslateCommands() {
-        let enabled = DshStateManager.shared.current.translateCommands ? "true" : "false"
-        let script = """
-        (() => {
-          const enabled = \(enabled);
-          window.__DSH_DESKTOP_TRANSLATE_COMMANDS__ = enabled;
-          window.dispatchEvent(new CustomEvent('dsh-desktop-translate-commands-change', { detail: { enabled } }));
-        })();
-        """
-        webView?.evaluateJavaScript(script, completionHandler: nil)
+        webShell?.syncTranslateCommands(enabled: DshStateManager.shared.current.translateCommands)
     }
 
     // MARK: - WKNavigationDelegate
@@ -716,6 +449,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         syncUiTheme()
         syncTranslateCommands()
         waitForWebUIReady()
+    }
+
+    @objc public func enableDeveloperTools() {
+        webShell?.enableDeveloperTools()
+    }
+
+    @objc public func closeDeveloperTools() {
+        webShell?.closeDeveloperTools()
     }
 
     public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
