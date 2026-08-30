@@ -148,6 +148,17 @@ test('first launch bootstraps the canonical profile and installs the host before
   assert.match(PLUGIN_SOURCE, /isInstalledWebServerPackage/)
 })
 
+test('the managed host webserver dependency is hidden from user plugin management', () => {
+  assert.match(PLUGIN_SOURCE, /internalPluginDependencyNames[\s\S]*@deepseek-ai\/dsh-host-webserver/)
+  assert.match(PLUGIN_SOURCE, /guard !Self\.internalPluginDependencyNames\.contains\(name\) else \{ continue \}/)
+  assert.match(PLUGIN_SOURCE, /guard !Self\.internalPluginDependencyNames\.contains\(pkgName\) else \{ continue \}/)
+  assert.match(PLUGIN_SOURCE, /不能直接安装 DSH 内部依赖/)
+  assert.match(PLUGIN_SOURCE, /不能直接更新 DSH 内部依赖/)
+  assert.match(PLUGIN_SOURCE, /不能直接卸载 DSH 内部依赖/)
+  assert.match(PLUGIN_SOURCE, /filter \{ !\$0\.isManaged && !\$0\.isLocal \}/)
+  assert.match(PLUGIN_SOURCE, /proc\.arguments = \["update"\] \+ pluginNames \+ \["--latest"\]/)
+})
+
 test('the upstream webserver is replaced and all request boundaries share the fence', () => {
   assert.match(HOST_PATCH, /id: webserver[\s\S]*disabled: true/)
   assert.match(HOST_PATCH, /name: dsh-desktop-host\/webserver/)

@@ -42,6 +42,12 @@ public final class DshPluginManager {
     public static let shared = DshPluginManager()
 
     public static let desktopHostPluginName = "dsh-desktop-host"
+    /// Packages required by the managed desktop bridge but not user-managed
+    /// plugins. They stay in the web profile so the bridge's peer dependency
+    /// and Cordis patch target remain resolvable.
+    private static let internalPluginDependencyNames: Set<String> = [
+        "@deepseek-ai/dsh-host-webserver",
+    ]
     private static let desktopHostRequiredFiles = [
         "package.json",
         "index.js",
@@ -381,6 +387,7 @@ public final class DshPluginManager {
 
         var list: [DshPluginItem] = []
         for (name, spec) in deps {
+            guard !Self.internalPluginDependencyNames.contains(name) else { continue }
             let isManaged = (name == Self.desktopHostPluginName)
             let isLocal = spec.hasPrefix("file:") || spec.hasPrefix("link:")
             let latest = outdatedMap[name]
@@ -496,6 +503,7 @@ public final class DshPluginManager {
 
         var outdated: [String: String] = [:]
         for (pkgName, info) in json {
+            guard !Self.internalPluginDependencyNames.contains(pkgName) else { continue }
             if let infoDict = info as? [String: Any],
                let latestVer = infoDict["latest"] as? String {
                 outdated[pkgName] = latestVer
@@ -506,6 +514,14 @@ public final class DshPluginManager {
 
     /// Add a plugin by name or npm specifier.
     public func addPlugin(spec: String) async throws {
+        if let packageName = packageName(from: spec),
+           Self.internalPluginDependencyNames.contains(packageName) {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -8,
+                userInfo: [NSLocalizedDescriptionKey: "不能直接安装 DSH 内部依赖 \(packageName)"]
+            )
+        }
         try await validateRegistryPackageIfNeeded(spec: spec)
 
         guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
@@ -542,6 +558,13 @@ public final class DshPluginManager {
 
     /// Update a specific plugin to its latest version.
     public func updatePlugin(name: String) async throws {
+        guard !Self.internalPluginDependencyNames.contains(name) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -8,
+                userInfo: [NSLocalizedDescriptionKey: "不能直接更新 DSH 内部依赖 \(name)"]
+            )
+        }
         guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
               let node = NodeRuntime.shared.resolveNodeBinary() else {
             throw NSError(domain: "DshPluginManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "缺少 Node 或 pnpm"])
@@ -589,10 +612,15 @@ public final class DshPluginManager {
         }
 
         let profileDir = Self.webProfileDirectory
+        let pluginNames = listPlugins()
+            .filter { !$0.isManaged && !$0.isLocal }
+            .map(\.name)
+        guard !pluginNames.isEmpty else { return }
+
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["update", "--latest"] + registryArguments() + ["--reporter=append-only"]
+        proc.arguments = ["update"] + pluginNames + ["--latest"] + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -608,6 +636,13 @@ public final class DshPluginManager {
 
     /// Remove a plugin by name.
     public func removePlugin(name: String) async throws {
+        guard !Self.internalPluginDependencyNames.contains(name) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -8,
+                userInfo: [NSLocalizedDescriptionKey: "不能直接卸载 DSH 内部依赖 \(name)"]
+            )
+        }
         guard name != Self.desktopHostPluginName else {
             throw NSError(domain: "DshPluginManager", code: -5, userInfo: [NSLocalizedDescriptionKey: "不能删除系统内置桥接插件"])
         }
