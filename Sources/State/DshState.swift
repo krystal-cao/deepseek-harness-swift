@@ -5,12 +5,238 @@ public enum DshNetworkExposure: String, Codable, Sendable {
     case lan
 }
 
+public enum DshRuntimeUpdatePolicy: String, Codable, Sendable {
+    case notify
+    case automaticStable
+}
+
+public enum DshRuntimeChannel: String, Codable, Sendable {
+    case latest
+    case next
+}
+
+public enum DshRuntimeTransactionPhase: String, Codable, Sendable {
+    case idle
+    case staging
+    case switching
+    case verifying
+    case confirmed
+    case rollingBack
+}
+
+public struct NpmRuntimeDescriptor: Codable, Equatable, Sendable {
+    public let version: String
+    public let registry: String
+    public let integrity: String?
+    public let installedAt: Date
+
+    public init(version: String, registry: String, integrity: String? = nil, installedAt: Date = Date()) {
+        self.version = version
+        self.registry = registry
+        self.integrity = integrity
+        self.installedAt = installedAt
+    }
+}
+
+public struct DshRuntimeState: Codable, Equatable, Sendable {
+    public var active: NpmRuntimeDescriptor?
+    public var previous: NpmRuntimeDescriptor?
+    public var pending: NpmRuntimeDescriptor?
+    public var phase: DshRuntimeTransactionPhase
+    public var updatePolicy: DshRuntimeUpdatePolicy
+    public var channel: DshRuntimeChannel
+    public var dismissedVersion: String?
+    public var dismissedAppVersion: String?
+    public var webProfileSnapshotID: String?
+    public var healthyStartCount: Int
+    public var lastDiagnostic: String?
+
+    public init(
+        active: NpmRuntimeDescriptor? = nil,
+        previous: NpmRuntimeDescriptor? = nil,
+        pending: NpmRuntimeDescriptor? = nil,
+        phase: DshRuntimeTransactionPhase = .idle,
+        updatePolicy: DshRuntimeUpdatePolicy = .notify,
+        channel: DshRuntimeChannel = .latest,
+        dismissedVersion: String? = nil,
+        dismissedAppVersion: String? = nil,
+        webProfileSnapshotID: String? = nil,
+        healthyStartCount: Int = 0,
+        lastDiagnostic: String? = nil
+    ) {
+        self.active = active
+        self.previous = previous
+        self.pending = pending
+        self.phase = phase
+        self.updatePolicy = channel == .next ? .notify : updatePolicy
+        self.channel = channel
+        self.dismissedVersion = dismissedVersion
+        self.dismissedAppVersion = dismissedAppVersion
+        self.webProfileSnapshotID = webProfileSnapshotID
+        self.healthyStartCount = healthyStartCount
+        self.lastDiagnostic = lastDiagnostic
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case active
+        case previous
+        case pending
+        case phase
+        case updatePolicy
+        case channel
+        case dismissedVersion
+        case dismissedAppVersion
+        case webProfileSnapshotID
+        case healthyStartCount
+        case lastDiagnostic
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.active = try container.decodeIfPresent(NpmRuntimeDescriptor.self, forKey: .active)
+        self.previous = try container.decodeIfPresent(NpmRuntimeDescriptor.self, forKey: .previous)
+        self.pending = try container.decodeIfPresent(NpmRuntimeDescriptor.self, forKey: .pending)
+        self.phase = try container.decodeIfPresent(DshRuntimeTransactionPhase.self, forKey: .phase) ?? .idle
+        self.updatePolicy = try container.decodeIfPresent(DshRuntimeUpdatePolicy.self, forKey: .updatePolicy) ?? .notify
+        self.channel = try container.decodeIfPresent(DshRuntimeChannel.self, forKey: .channel) ?? .latest
+        if self.channel == .next {
+            self.updatePolicy = .notify
+        }
+        self.dismissedVersion = try container.decodeIfPresent(String.self, forKey: .dismissedVersion)
+        self.dismissedAppVersion = try container.decodeIfPresent(String.self, forKey: .dismissedAppVersion)
+        self.webProfileSnapshotID = try container.decodeIfPresent(String.self, forKey: .webProfileSnapshotID)
+        self.healthyStartCount = try container.decodeIfPresent(Int.self, forKey: .healthyStartCount) ?? 0
+        self.lastDiagnostic = try container.decodeIfPresent(String.self, forKey: .lastDiagnostic)
+    }
+
+    public static let `default` = DshRuntimeState()
+}
+
+public enum DshRuntimeRecoveryAction: Equatable, Sendable {
+    case finalizeConfirmed(active: NpmRuntimeDescriptor)
+    case rollback(active: NpmRuntimeDescriptor, candidate: NpmRuntimeDescriptor)
+    case reset(candidate: NpmRuntimeDescriptor)
+}
+
+/// Pure recovery decision logic shared by startup and integration tests.
+/// Filesystem deletion and service restart stay outside this planner.
+public enum DshRuntimeRecoveryPlanner {
+    public static func plan(
+        state: DshStateConfig,
+        installedVersions: Set<String>
+    ) -> DshRuntimeRecoveryAction? {
+        guard let pending = state.runtimeState.pending else { return nil }
+
+        if state.runtimeState.phase == .confirmed,
+           state.selectedVersion == pending.version,
+           installedVersions.contains(pending.version) {
+            return .finalizeConfirmed(active: pending)
+        }
+
+        if let previous = state.runtimeState.previous,
+           installedVersions.contains(previous.version) {
+            return .rollback(active: previous, candidate: pending)
+        }
+
+        return .reset(candidate: pending)
+    }
+}
+
+/// Pure transaction transitions. Side effects such as npm installation,
+/// service restart and filesystem cleanup remain in their callers, while the
+/// persisted state shape is exercised by executable integration tests.
+public enum DshRuntimeTransaction {
+    public static func begin(
+        active: NpmRuntimeDescriptor,
+        candidate: NpmRuntimeDescriptor,
+        updatePolicy: DshRuntimeUpdatePolicy,
+        channel: DshRuntimeChannel
+    ) -> DshRuntimeState {
+        DshRuntimeState(
+            active: active,
+            previous: active,
+            pending: candidate,
+            phase: .staging,
+            updatePolicy: updatePolicy,
+            channel: channel,
+            healthyStartCount: 0,
+            lastDiagnostic: nil
+        )
+    }
+
+    public static func attachWebProfileSnapshot(
+        _ state: DshRuntimeState,
+        id: String
+    ) -> DshRuntimeState {
+        var next = state
+        next.webProfileSnapshotID = id
+        return next
+    }
+
+    public static func activateCandidate(_ state: DshRuntimeState) -> DshRuntimeState {
+        guard let candidate = state.pending else { return state }
+        var next = state
+        next.active = candidate
+        next.phase = .switching
+        return next
+    }
+
+    public static func beginVerification(_ state: DshRuntimeState) -> DshRuntimeState {
+        var next = state
+        next.phase = .verifying
+        return next
+    }
+
+    public static func confirm(_ state: DshRuntimeState) -> DshRuntimeState {
+        var next = state
+        next.pending = nil
+        next.phase = .confirmed
+        next.dismissedVersion = nil
+        next.dismissedAppVersion = nil
+        next.healthyStartCount = 1
+        next.lastDiagnostic = nil
+        return next
+    }
+
+    public static func beginRollback(_ state: DshRuntimeState) -> DshRuntimeState {
+        var next = state
+        next.phase = .rollingBack
+        return next
+    }
+
+    public static func recordRollbackFailure(
+        _ state: DshRuntimeState,
+        diagnostic: String
+    ) -> DshRuntimeState {
+        var next = state
+        next.phase = .rollingBack
+        next.lastDiagnostic = diagnostic
+        return next
+    }
+
+    public static func finishRollback(
+        _ state: DshRuntimeState,
+        active: NpmRuntimeDescriptor,
+        retainedWebProfileSnapshotID: String? = nil
+    ) -> DshRuntimeState {
+        var next = state
+        next.active = active
+        next.previous = nil
+        next.pending = nil
+        next.phase = .idle
+        next.webProfileSnapshotID = retainedWebProfileSnapshotID
+        next.healthyStartCount = 0
+        return next
+    }
+}
+
 /// Persistent configuration and state model for DSH Desktop.
 public struct DshStateConfig: Codable, Equatable {
     public var selectedVersion: String?
     public var dismissedLatest: String?
     public var autoFollowLatest: Bool
     public var npmRegistry: String?
+    public var runtimeState: DshRuntimeState
     public var dshPort: Int?
     public var browserAccessEnabled: Bool
     public var networkExposure: DshNetworkExposure
@@ -21,8 +247,9 @@ public struct DshStateConfig: Codable, Equatable {
     public init(
         selectedVersion: String? = nil,
         dismissedLatest: String? = nil,
-        autoFollowLatest: Bool = true,
+        autoFollowLatest: Bool = false,
         npmRegistry: String? = nil,
+        runtimeState: DshRuntimeState = .default,
         dshPort: Int? = 3080,
         browserAccessEnabled: Bool = false,
         networkExposure: DshNetworkExposure = .loopback,
@@ -34,6 +261,7 @@ public struct DshStateConfig: Codable, Equatable {
         self.dismissedLatest = dismissedLatest
         self.autoFollowLatest = autoFollowLatest
         self.npmRegistry = npmRegistry
+        self.runtimeState = runtimeState
         self.dshPort = dshPort ?? 3080
         self.browserAccessEnabled = browserAccessEnabled
         self.networkExposure = browserAccessEnabled ? networkExposure : .loopback
@@ -47,6 +275,7 @@ public struct DshStateConfig: Codable, Equatable {
         case dismissedLatest
         case autoFollowLatest
         case npmRegistry
+        case runtimeState
         case dshPort
         case browserAccessEnabled
         case networkExposure
@@ -59,8 +288,22 @@ public struct DshStateConfig: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.selectedVersion = try container.decodeIfPresent(String.self, forKey: .selectedVersion)
         self.dismissedLatest = try container.decodeIfPresent(String.self, forKey: .dismissedLatest)
-        self.autoFollowLatest = try container.decodeIfPresent(Bool.self, forKey: .autoFollowLatest) ?? true
+        // New profiles default to notification-only updates. If an older
+        // profile explicitly persisted autoFollowLatest, preserve that user
+        // choice during migration.
+        self.autoFollowLatest = try container.decodeIfPresent(Bool.self, forKey: .autoFollowLatest) ?? false
         self.npmRegistry = try container.decodeIfPresent(String.self, forKey: .npmRegistry)
+        if let runtimeState = try container.decodeIfPresent(DshRuntimeState.self, forKey: .runtimeState) {
+            self.runtimeState = runtimeState
+            // Keep the legacy field coherent for older app builds that may
+            // still decode the same state file.
+            self.autoFollowLatest = runtimeState.updatePolicy == .automaticStable
+        } else {
+            self.runtimeState = DshRuntimeState(
+                updatePolicy: self.autoFollowLatest ? .automaticStable : .notify,
+                dismissedVersion: self.dismissedLatest
+            )
+        }
         self.dshPort = try container.decodeIfPresent(Int.self, forKey: .dshPort) ?? 3080
         // Missing in pre-2A state files means browser access remains closed.
         self.browserAccessEnabled = try container.decodeIfPresent(Bool.self, forKey: .browserAccessEnabled) ?? false
@@ -77,6 +320,7 @@ public struct DshStateConfig: Codable, Equatable {
         try container.encodeIfPresent(dismissedLatest, forKey: .dismissedLatest)
         try container.encode(autoFollowLatest, forKey: .autoFollowLatest)
         try container.encodeIfPresent(npmRegistry, forKey: .npmRegistry)
+        try container.encode(runtimeState, forKey: .runtimeState)
         try container.encode(dshPort, forKey: .dshPort)
         try container.encode(browserAccessEnabled, forKey: .browserAccessEnabled)
         try container.encode(networkExposure, forKey: .networkExposure)

@@ -5,6 +5,7 @@ public struct DshVersionItem: Identifiable, Equatable {
     public let version: String
     public let publishedAt: String?
     public let tags: [String]
+    public let integrity: String?
     public let isInstalled: Bool
     public let isSelected: Bool
 
@@ -12,12 +13,14 @@ public struct DshVersionItem: Identifiable, Equatable {
         version: String,
         publishedAt: String? = nil,
         tags: [String] = [],
+        integrity: String? = nil,
         isInstalled: Bool = false,
         isSelected: Bool = false
     ) {
         self.version = version
         self.publishedAt = publishedAt
         self.tags = tags
+        self.integrity = integrity
         self.isInstalled = isInstalled
         self.isSelected = isSelected
     }
@@ -43,7 +46,6 @@ public final class DshVersionManager {
 
     public static let defaultRegistry = "https://registry.npmjs.org"
     public static let mirrorRegistry = "https://registry.npmmirror.com"
-    private static let versionPattern = try! NSRegularExpression(pattern: #"^\d+\.\d+\.\d+(?:-rc\.\d+)?$"#)
 
     private init() {
         cleanupStaleStagingDirs()
@@ -59,8 +61,22 @@ public final class DshVersionManager {
     }
 
     public static func isValidVersion(_ version: String) -> Bool {
-        let range = NSRange(version.startIndex..., in: version)
-        return versionPattern.firstMatch(in: version, range: range) != nil
+        guard let parsed = DshSemanticVersion(version), parsed.buildMetadata.isEmpty else { return false }
+        // Alpha/beta support is intentionally not enabled until an upstream
+        // npm release and its compatibility contract have been verified.
+        return parsed.prerelease.isEmpty || (
+            parsed.prerelease.count == 2 &&
+            parsed.prerelease[0] == "rc" &&
+            Int(parsed.prerelease[1]) != nil
+        )
+    }
+
+    public static func normalizedRegistry(_ registry: String?) -> String {
+        var value = (registry?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? registry!.trimmingCharacters(in: .whitespacesAndNewlines)
+            : defaultRegistry
+        while value.hasSuffix("/") { value.removeLast() }
+        return value
     }
 
     /// List only complete user-installed versions. Swift has no bundled DSH
@@ -81,6 +97,36 @@ public final class DshVersionManager {
         resolvedEntry(for: version) != nil
     }
 
+    /// Remove legacy managed Runtime directories that are no longer reachable
+    /// from the persisted transaction state. The current update policy has no
+    /// user-facing arbitrary switch action, so retaining unreferenced history
+    /// only leaves stale disk state. Never collect while a transaction is
+    /// pending, and preserve every exact active/previous/candidate reference.
+    @discardableResult
+    public func cleanupUnreferencedVersions() -> [String] {
+        let state = DshStateManager.shared.current
+        guard state.runtimeState.pending == nil else { return [] }
+
+        var retained = Set<String>()
+        if let selected = state.selectedVersion { retained.insert(selected) }
+        if let active = state.runtimeState.active?.version { retained.insert(active) }
+        if let previous = state.runtimeState.previous?.version { retained.insert(previous) }
+        guard !retained.isEmpty else { return [] }
+
+        let fileManager = FileManager.default
+        var removed: [String] = []
+        for version in listInstalledVersions() where !retained.contains(version) {
+            let target = DshStateManager.versionsDirectory.appendingPathComponent(version, isDirectory: true)
+            do {
+                try fileManager.removeItem(at: target)
+                removed.append(version)
+            } catch {
+                print("[DshVersionManager] Failed to remove legacy Runtime \(version):", error)
+            }
+        }
+        return removed
+    }
+
     /// Establish the initial selection only when the state has no selection.
     /// A stale/corrupt explicit selection is kept unresolved so the UI can
     /// explain that the selected runtime must be reinstalled.
@@ -88,21 +134,46 @@ public final class DshVersionManager {
     public func ensureSelection() -> String? {
         let state = DshStateManager.shared.current
         if let selected = state.selectedVersion {
-            return isVersionInstalled(selected) ? selected : nil
+            if isVersionInstalled(selected) {
+                syncActiveRuntimeState(for: selected)
+                return selected
+            }
+
+            let fallback = listInstalledVersions().first
+            let descriptor = fallback.map { runtimeDescriptor(version: $0) }
+            DshStateManager.shared.update { state in
+                state.selectedVersion = fallback
+                state.runtimeState.active = descriptor
+                state.runtimeState.phase = .idle
+                state.runtimeState.lastDiagnostic = fallback.map {
+                    "原先选择的 DSH Runtime \(selected) 不可运行，已自动切换到 \($0)。"
+                } ?? "原先选择的 DSH Runtime \(selected) 不可运行，请重新安装 Runtime。"
+            }
+            return fallback
         }
         guard let first = listInstalledVersions().first else { return nil }
-        DshStateManager.shared.update { $0.selectedVersion = first }
+        let descriptor = runtimeDescriptor(version: first)
+        DshStateManager.shared.update { state in
+            state.selectedVersion = first
+            state.runtimeState.active = descriptor
+        }
         return first
     }
 
     /// Resolve the executable bin.js path for the currently active version.
     public func resolveCurrentEntry() -> String? {
         if let selected = DshStateManager.shared.current.selectedVersion {
-            return resolvedEntry(for: selected)?.path
+            guard let entry = resolvedEntry(for: selected) else { return nil }
+            syncActiveRuntimeState(for: selected)
+            return entry.path
         }
 
         if let first = listInstalledVersions().first {
-            DshStateManager.shared.update { $0.selectedVersion = first }
+            let descriptor = runtimeDescriptor(version: first)
+            DshStateManager.shared.update { state in
+                state.selectedVersion = first
+                state.runtimeState.active = descriptor
+            }
             return resolvedEntry(for: first)?.path
         }
 
@@ -153,11 +224,9 @@ public final class DshVersionManager {
     }
 
     /// Fetch version catalog from the npm registry.
-    public func fetchCatalog(registry: String? = nil) async throws -> (latest: String?, versions: [DshVersionItem]) {
-        let reg = (registry?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? registry!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : (DshStateManager.shared.current.npmRegistry ?? Self.defaultRegistry)
-        let trimmedReg = reg.hasSuffix("/") ? String(reg.dropLast()) : reg
+    public func fetchCatalog(registry: String? = nil) async throws -> (latest: String?, next: String?, versions: [DshVersionItem]) {
+        let reg = Self.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry)
+        let trimmedReg = reg
         guard let url = URL(string: "\(trimmedReg)/@deepseek-ai%2Fdsh") ?? URL(string: "\(trimmedReg)/@deepseek-ai/dsh") else {
             throw NSError(domain: "DshVersionManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "无效的 npm Registry 地址"])
         }
@@ -176,29 +245,33 @@ public final class DshVersionManager {
         }
 
         let distTags = json["dist-tags"] as? [String: String] ?? [:]
-        let latestTag = distTags["latest"]
+        let latestTag = distTags["latest"].flatMap { Self.isValidVersion($0) ? $0 : nil }
+        let nextTag = distTags["next"].flatMap { Self.isValidVersion($0) ? $0 : nil }
         let timeDict = json["time"] as? [String: String] ?? [:]
         let versionsDict = json["versions"] as? [String: Any] ?? [:]
 
         let installed = Set(listInstalledVersions())
         let currentSelected = DshStateManager.shared.current.selectedVersion
 
-        let allVersions = sortVersions(Array(versionsDict.keys))
+        let allVersions = sortVersions(versionsDict.keys.filter(Self.isValidVersion))
         let items: [DshVersionItem] = allVersions.map { ver in
             var tags: [String] = []
             for (tag, tagVer) in distTags where tagVer == ver {
                 tags.append(tag)
             }
+            let manifest = versionsDict[ver] as? [String: Any]
+            let dist = manifest?["dist"] as? [String: Any]
             return DshVersionItem(
                 version: ver,
                 publishedAt: timeDict[ver],
                 tags: tags,
+                integrity: dist?["integrity"] as? String,
                 isInstalled: installed.contains(ver),
                 isSelected: currentSelected == ver
             )
         }
 
-        return (latest: latestTag, versions: items)
+        return (latest: latestTag, next: nextTag, versions: items)
     }
 
     private func loadDshFamilyPackages() throws -> [String] {
@@ -292,10 +365,71 @@ public final class DshVersionManager {
         }
     }
 
+    /// Verify the main DSH package's npm integrity as recorded by pnpm in the
+    /// generated lockfile. pnpm validates the tarball while downloading; this
+    /// second check ensures the committed candidate resolves to the exact
+    /// manifest advertised by the catalog we accepted.
+    private func verifyNpmIntegrity(
+        expected: String,
+        version: String,
+        in installRoot: URL
+    ) throws {
+        let lockfile = installRoot.appendingPathComponent("pnpm-lock.yaml")
+        guard let text = try? String(contentsOf: lockfile, encoding: .utf8) else {
+            throw NSError(
+                domain: "DshVersionManager",
+                code: -16,
+                userInfo: [NSLocalizedDescriptionKey: "DSH \(version) 安装结果缺少 pnpm integrity 记录"]
+            )
+        }
+
+        let packageKey = "  '@deepseek-ai/dsh@\(version)':"
+        guard let keyRange = text.range(of: packageKey) else {
+            throw NSError(
+                domain: "DshVersionManager",
+                code: -16,
+                userInfo: [NSLocalizedDescriptionKey: "DSH \(version) 安装结果缺少主包锁定记录"]
+            )
+        }
+
+        let section = text[keyRange.upperBound...]
+        let lines = section.split(whereSeparator: \.isNewline)
+        var actual: String?
+        for line in lines.prefix(8) {
+            if line.hasPrefix("  '") { break }
+            guard let integrityRange = line.range(of: "integrity:") else { continue }
+            let value = String(line[integrityRange.upperBound...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: ",}"))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty {
+                actual = value
+                break
+            }
+        }
+
+        guard let actual else {
+            throw NSError(
+                domain: "DshVersionManager",
+                code: -16,
+                userInfo: [NSLocalizedDescriptionKey: "DSH \(version) 安装结果缺少主包 integrity"]
+            )
+        }
+        guard actual == expected else {
+            throw NSError(
+                domain: "DshVersionManager",
+                code: -17,
+                userInfo: [NSLocalizedDescriptionKey: "DSH \(version) integrity 与 npm 目录不一致"]
+            )
+        }
+    }
+
     /// Install a specific version using bundled pnpm into an atomic directory.
     public func installVersion(
         version: String,
         registry: String? = nil,
+        activateWhenMissing: Bool = true,
+        expectedIntegrity: String,
         onProgress: @escaping (InstallProgress) -> Void
     ) async throws -> Bool {
         guard Self.isValidVersion(version) else {
@@ -306,22 +440,53 @@ public final class DshVersionManager {
             throw NSError(domain: "DshVersionManager", code: -4, userInfo: [NSLocalizedDescriptionKey: "缺少 Node.js 运行时或 pnpm 包管理器"])
         }
 
+        let reg = Self.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry)
         let hadRunnableVersion = resolveCurrentEntry() != nil
         let existingTarget = DshStateManager.versionsDirectory.appendingPathComponent(version, isDirectory: true)
         if FileManager.default.fileExists(atPath: existingTarget.path) {
             guard isVersionInstalled(version) else {
                 throw NSError(domain: "DshVersionManager", code: -9, userInfo: [NSLocalizedDescriptionKey: "已存在但无法校验 DSH \(version) 的安装目录"])
             }
-            if !hadRunnableVersion {
-                DshStateManager.shared.update { $0.selectedVersion = version }
+
+            // An existing directory may be a leftover from an older manager
+            // or a failed transaction. Re-run the exact same family
+            // availability and same-version checks used for a fresh install;
+            // the main package manifest alone is not enough to reuse it.
+            let alignedFamily = try await resolveAlignedFamily(version: version, registry: reg)
+            guard alignedFamily.missing.isEmpty else {
+                throw NSError(
+                    domain: "DshVersionManager",
+                    code: -15,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "DSH \(version) 的插件族尚未在同一 Registry 完整发布：\(alignedFamily.missing.joined(separator: ", "))"
+                    ]
+                )
+            }
+            let misalignedPackages = misalignedFamilyPackages(
+                in: existingTarget,
+                version: version,
+                packages: alignedFamily.available
+            )
+            guard misalignedPackages.isEmpty else {
+                throw NSError(
+                    domain: "DshVersionManager",
+                    code: -14,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "已安装的 DSH 插件族版本校验失败：\(misalignedPackages.joined(separator: ", "))"
+                    ]
+                )
+            }
+            try verifyNpmIntegrity(expected: expectedIntegrity, version: version, in: existingTarget)
+            if !hadRunnableVersion && activateWhenMissing {
+                let descriptor = runtimeDescriptor(version: version, registry: reg, integrity: expectedIntegrity)
+                DshStateManager.shared.update { state in
+                    state.selectedVersion = version
+                    state.runtimeState.active = descriptor
+                }
                 return true
             }
             return false
         }
-
-        let reg = (registry?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
-            ? registry!.trimmingCharacters(in: .whitespacesAndNewlines)
-            : (DshStateManager.shared.current.npmRegistry ?? Self.defaultRegistry)
 
         let versionsDir = DshStateManager.versionsDirectory
         let stagingName = ".staging-\(version)-\(Int(Date().timeIntervalSince1970))"
@@ -339,6 +504,15 @@ public final class DshVersionManager {
         onProgress(InstallProgress(version: version, phase: "正在检查 DSH 插件族...", detail: "目标版本：\(version)"))
         let alignedFamily = try await resolveAlignedFamily(version: version, registry: reg)
         let familyTotal = alignedFamily.available.count + alignedFamily.missing.count
+        guard alignedFamily.missing.isEmpty else {
+            throw NSError(
+                domain: "DshVersionManager",
+                code: -15,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "DSH \(version) 的插件族尚未在同一 Registry 完整发布：\(alignedFamily.missing.joined(separator: ", "))"
+                ]
+            )
+        }
         onProgress(InstallProgress(
             version: version,
             phase: "正在从 npm 下载 DSH \(version)...",
@@ -427,6 +601,9 @@ public final class DshVersionManager {
             )
         }
 
+        onProgress(InstallProgress(version: version, phase: "正在校验 npm 制品...", detail: "校验 DSH integrity"))
+        try verifyNpmIntegrity(expected: expectedIntegrity, version: version, in: stagingDir)
+
         onProgress(InstallProgress(version: version, phase: "正在准备环境...", detail: "移动到版本目录"))
 
         // Atomically replace target directory
@@ -436,18 +613,73 @@ public final class DshVersionManager {
         try FileManager.default.moveItem(at: stagingDir, to: targetDir)
         movedToTarget = true
 
+        let descriptor = runtimeDescriptor(version: version, registry: reg, integrity: expectedIntegrity)
         DshStateManager.shared.update { state in
-            if !hadRunnableVersion || state.selectedVersion == nil {
+            if activateWhenMissing && (!hadRunnableVersion || state.selectedVersion == nil) {
                 state.selectedVersion = version
+                state.runtimeState.active = descriptor
             }
         }
 
         onProgress(InstallProgress(
             version: version,
             phase: "安装完成",
-            detail: "插件族已对齐 \(alignedFamily.available.count) 个，\(alignedFamily.missing.count) 个版本尚未发布"
+            detail: "插件族已对齐 \(alignedFamily.available.count) 个"
         ))
         return !hadRunnableVersion
+    }
+
+    /// Install a version into the managed store without changing the active
+    /// selection. Runtime upgrades use this for candidate staging.
+    public func installCandidate(
+        version: String,
+        registry: String? = nil,
+        expectedIntegrity: String,
+        onProgress: @escaping (InstallProgress) -> Void
+    ) async throws {
+        _ = try await installVersion(
+            version: version,
+            registry: registry,
+            activateWhenMissing: false,
+            expectedIntegrity: expectedIntegrity,
+            onProgress: onProgress
+        )
+    }
+
+    /// Remove a specifically named candidate during transaction recovery.
+    /// Unlike the user-facing uninstall path, this is only used for a
+    /// persisted, non-active update candidate.
+    public func discardInstalledVersion(_ version: String) throws {
+        guard Self.isValidVersion(version),
+              DshStateManager.shared.current.selectedVersion != version else { return }
+        let target = DshStateManager.versionsDirectory.appendingPathComponent(version, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: target.path) else { return }
+        try FileManager.default.removeItem(at: target)
+    }
+
+    private func runtimeDescriptor(
+        version: String,
+        registry: String? = nil,
+        integrity: String? = nil
+    ) -> NpmRuntimeDescriptor {
+        NpmRuntimeDescriptor(
+            version: version,
+            registry: Self.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry),
+            integrity: integrity
+        )
+    }
+
+    private func syncActiveRuntimeState(for version: String) {
+        let state = DshStateManager.shared.current
+        guard state.runtimeState.pending == nil || state.runtimeState.phase == .idle || state.runtimeState.phase == .confirmed else {
+            return
+        }
+        guard state.runtimeState.active?.version != version else { return }
+        let descriptor = runtimeDescriptor(version: version, registry: state.runtimeState.active?.registry ?? state.npmRegistry)
+        DshStateManager.shared.update { state in
+            state.runtimeState.active = descriptor
+            state.runtimeState.phase = .idle
+        }
     }
 
     private func writeText(_ text: String, to url: URL) throws {
@@ -554,22 +786,6 @@ public final class DshVersionManager {
             )
         }
         return finalOutput
-    }
-
-    /// Uninstall a version.
-    public func uninstallVersion(version: String) throws {
-        guard Self.isValidVersion(version) else {
-            throw NSError(domain: "DshVersionManager", code: -10, userInfo: [NSLocalizedDescriptionKey: "无效的 DSH 版本号"])
-        }
-        let current = DshStateManager.shared.current.selectedVersion
-        guard current != version else {
-            throw NSError(domain: "DshVersionManager", code: -11, userInfo: [NSLocalizedDescriptionKey: "请先切换到其他版本，再卸载当前版本"])
-        }
-        let targetDir = DshStateManager.versionsDirectory.appendingPathComponent(version)
-        guard isVersionInstalled(version), FileManager.default.fileExists(atPath: targetDir.path) else {
-            throw NSError(domain: "DshVersionManager", code: -12, userInfo: [NSLocalizedDescriptionKey: "该版本未安装"])
-        }
-        try FileManager.default.removeItem(at: targetDir)
     }
 
     /// Natural SemVer version sorting (highest version first).

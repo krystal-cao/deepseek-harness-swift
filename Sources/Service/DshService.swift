@@ -1,6 +1,46 @@
 import Foundation
 import Darwin
 
+/// Non-blocking FIFO gate shared by service startup and the desktop shell's
+/// wider Runtime/Profile operation. Waiting callers suspend instead of
+/// blocking the main actor.
+final class DshAsyncOperationGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isHeld = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        await withCheckedContinuation { continuation in
+            var resumeImmediately = false
+            lock.lock()
+            if isHeld {
+                waiters.append(continuation)
+            } else {
+                isHeld = true
+                resumeImmediately = true
+            }
+            lock.unlock()
+
+            if resumeImmediately {
+                continuation.resume()
+            }
+        }
+    }
+
+    func release() {
+        let next: CheckedContinuation<Void, Never>?
+        lock.lock()
+        if waiters.isEmpty {
+            isHeld = false
+            next = nil
+        } else {
+            next = waiters.removeFirst()
+        }
+        lock.unlock()
+        next?.resume()
+    }
+}
+
 /// Spawns and supervises the DSH Web child process.
 public final class DshService: @unchecked Sendable {
     public static let shared = DshService()
@@ -25,6 +65,7 @@ public final class DshService: @unchecked Sendable {
 
     private var process: ManagedDshProcess?
     private let lock = NSLock()
+    private let startOperationGate = DshAsyncOperationGate()
     private var processRecordURL: URL {
         DshStateManager.appSupportDirectory.appendingPathComponent("dsh-service-process.json")
     }
@@ -82,6 +123,9 @@ public final class DshService: @unchecked Sendable {
 
     /// Start or restart the DSH service and return the protected session.
     public func start(port: Int? = nil) async throws -> DshServiceSession {
+        await startOperationGate.acquire()
+        defer { startOperationGate.release() }
+
         let actualPort = port ?? (DshStateManager.shared.current.dshPort ?? 3080)
 
         // A settings change, version switch, or plugin mutation is a restart.
@@ -250,7 +294,10 @@ public final class DshService: @unchecked Sendable {
         signalManagedProcess(managed, SIGKILL)
     }
 
-    private func stopAndWait() async {
+    /// Stop the managed child without blocking the caller while waiting for
+    /// its termination. Runtime/Profile transactions use this before taking
+    /// a Profile snapshot so Node cannot mutate the tree during the clone.
+    public func stopAndWait() async {
         let managed = takeProcess()
 
         guard let managed else { return }

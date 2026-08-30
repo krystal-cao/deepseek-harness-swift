@@ -110,12 +110,36 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var serviceSession: DshServiceSession?
     private var onboardingHostingView: NSView?
     private var webUIReadinessGeneration = 0
+    private var pendingWebUINavigation: WKNavigation?
+    private var webUIReadyContinuation: CheckedContinuation<Void, Error>?
+    private var webUIReadyTimeoutTask: Task<Void, Never>?
     private var windowDragMouseDownEvent: NSEvent?
     private var isUsingNativeWindowDrag = false
     private var windowDragStartOrigin: NSPoint?
     private var windowDragStartMouseLocation: NSPoint?
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var downloadStatusBanner: DownloadStatusBanner?
+    private let runtimeOperationGate = DshAsyncOperationGate()
+
+    private enum RuntimeHealthError: LocalizedError {
+        case nonHTTPResponse(String)
+        case unexpectedStatus(label: String, expected: String, actual: Int)
+        case malformedBrowserURL
+        case malformedLANURL
+
+        var errorDescription: String? {
+            switch self {
+            case .nonHTTPResponse(let label):
+                return "\(label) 没有返回有效的 HTTP 响应。"
+            case .unexpectedStatus(let label, let expected, let actual):
+                return "\(label) 健康检查失败：期望 \(expected)，实际 HTTP \(actual)。"
+            case .malformedBrowserURL:
+                return "Browser 访问边界检查失败：Host 返回了无效的 loopback URL。"
+            case .malformedLANURL:
+                return "LAN 访问边界检查失败：Host 返回了无效的局域网 URL。"
+            }
+        }
+    }
 
 
     private init() {
@@ -199,8 +223,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         hideOnboardingView()
         Task { @MainActor in
             do {
-                let session = try await restartDshService()
-                print("[MainWindowController] DSH service ready at \(session.url)")
+                _ = try await withRuntimeOperation {
+                    let session = try await self.restartDshServiceDuringOperation()
+                    print("[MainWindowController] DSH service ready at \(session.url)")
+                    await SettingsViewModel.shared.recordHealthyRuntimeStart()
+                    await SettingsViewModel.shared.finalizeRecoveredRuntimeAfterSuccessfulStart()
+                    return session
+                }
             } catch {
                 print("[MainWindowController] Service start failed:", error)
                 self.revealWindow()
@@ -213,6 +242,56 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     /// settings version switch uses this throwing form so it can restore the
     /// previous selection if the new runtime fails to boot.
     public func restartDshService() async throws -> DshServiceSession {
+        try await withRuntimeOperation {
+            try await self.restartDshServiceDuringOperation()
+        }
+    }
+
+    /// Serialize the entire Runtime/Profile transaction, not only the final
+    /// process restart. This prevents startup, auto-update, manual update and
+    /// plugin mutations from interleaving profile changes or replacing the
+    /// shared Web UI continuation.
+    public func withRuntimeOperation<T>(_ operation: () async throws -> T) async throws -> T {
+        await runtimeOperationGate.acquire()
+        defer { runtimeOperationGate.release() }
+        return try await operation()
+    }
+
+    /// Called by a caller that already holds `withRuntimeOperation`.
+    public func restartDshServiceDuringOperation() async throws -> DshServiceSession {
+        let runtimeState = DshStateManager.shared.current.runtimeState
+        if runtimeState.phase == .rollingBack,
+           let snapshotID = runtimeState.webProfileSnapshotID {
+            try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID) { progress in
+                Task { @MainActor in
+                    SettingsViewModel.shared.installProgressPhase = progress.phase
+                    SettingsViewModel.shared.installProgressDetail = progress.detail
+                }
+            }
+        }
+        if [.switching, .verifying].contains(runtimeState.phase),
+           runtimeState.pending != nil,
+           runtimeState.webProfileSnapshotID == nil {
+            // Freeze the shared Profile before taking its snapshot. The copy
+            // itself runs off-main, but stopping the old service first also
+            // prevents it from mutating package metadata during the clone.
+            await DshService.shared.stopAndWait()
+            let snapshotID = try await DshPluginManager.shared.createWebProfileSnapshot { progress in
+                Task { @MainActor in
+                    SettingsViewModel.shared.installProgressPhase = progress.phase
+                    SettingsViewModel.shared.installProgressDetail = progress.detail
+                }
+            }
+            DshStateManager.shared.update { state in
+                guard state.runtimeState.pending?.version == runtimeState.pending?.version,
+                      [.switching, .verifying].contains(state.runtimeState.phase) else { return }
+                state.runtimeState = DshRuntimeTransaction.attachWebProfileSnapshot(
+                    state.runtimeState,
+                    id: snapshotID
+                )
+            }
+        }
+
         // The profile must be complete and the access-control bundle must be
         // mounted before Node starts. This removes the old first-launch window
         // where DSH briefly listened through the unprotected upstream server.
@@ -235,8 +314,173 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
 
         serviceSession = session
         webUIReadinessGeneration &+= 1
-        self.webView?.load(URLRequest(url: session.url))
+        pendingWebUINavigation = nil
+        guard let navigation = self.webView?.load(URLRequest(url: session.url)) else {
+            DshService.shared.stop()
+            throw NSError(domain: "DshWebUI", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法加载 DSH 页面"])
+        }
+        pendingWebUINavigation = navigation
+        do {
+            try await waitForWebUIReady()
+            try await verifyRuntimeHealth(session: session)
+        } catch {
+            DshService.shared.stop()
+            throw error
+        }
         return session
+    }
+
+    /// Verify the parts of the runtime contract that are stable in the
+    /// currently installed npm release. This deliberately uses the same
+    /// protected loopback carrier as WebKit, so a green service handshake
+    /// cannot mask a broken Renderer cookie or an accidentally open route.
+    ///
+    /// The current 0.1.1-rc.2 package does not expose a stable read-only RPC
+    /// such as workspace.list; that optional capability is therefore not
+    /// invented here. When upstream exposes one, it can be added as another
+    /// capability-specific probe without weakening these mandatory checks.
+    private func verifyRuntimeHealth(session: DshServiceSession) async throws {
+        let rendererRequest = runtimeHealthRequest(
+            url: session.url,
+            method: "GET",
+            rendererToken: session.access.rendererToken
+        )
+        let rendererResponse = try await runtimeHealthResponse(for: rendererRequest, label: "Renderer 页面")
+        guard (200...299).contains(rendererResponse.statusCode) else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "Renderer 页面",
+                expected: "2xx",
+                actual: rendererResponse.statusCode
+            )
+        }
+
+        let anonymousRequest = runtimeHealthRequest(url: session.url)
+        let anonymousResponse = try await runtimeHealthResponse(for: anonymousRequest, label: "匿名 loopback")
+        guard anonymousResponse.statusCode == 403 else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "匿名 loopback",
+                expected: "403",
+                actual: anonymousResponse.statusCode
+            )
+        }
+
+        try await verifyBrowserAccessBoundary(session: session)
+        if DshStateManager.shared.current.networkExposure == .lan {
+            try await verifyLANAccessBoundary(session: session)
+        }
+    }
+
+    private func verifyBrowserAccessBoundary(session: DshServiceSession) async throws {
+        let routeURL = session.url.appendingPathComponent("__dsh_swift/browser-url")
+        var request = runtimeHealthRequest(
+            url: routeURL,
+            method: "POST",
+            rendererToken: session.access.rendererToken
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let response = try await runtimeHealthResponse(for: request, label: "Browser URL 路由")
+        let browserEnabled = DshStateManager.shared.current.browserAccessEnabled
+
+        guard browserEnabled else {
+            guard response.statusCode == 403 else {
+                throw RuntimeHealthError.unexpectedStatus(
+                    label: "关闭状态的 Browser URL 路由",
+                    expected: "403",
+                    actual: response.statusCode
+                )
+            }
+            return
+        }
+
+        guard response.statusCode == 200 else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "开启状态的 Browser URL 路由",
+                expected: "200",
+                actual: response.statusCode
+            )
+        }
+        struct BrowserURLResponse: Decodable {
+            let url: URL
+        }
+        guard let payload = try? JSONDecoder().decode(BrowserURLResponse.self, from: response.body),
+              payload.url.scheme == "http",
+              payload.url.host == "127.0.0.1",
+              payload.url.port == session.url.port else {
+            throw RuntimeHealthError.malformedBrowserURL
+        }
+
+        let browserPageResponse = try await runtimeHealthResponse(
+            for: runtimeHealthRequest(url: payload.url),
+            label: "Browser 鉴权页面"
+        )
+        guard (200...299).contains(browserPageResponse.statusCode) else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "Browser 鉴权页面",
+                expected: "2xx",
+                actual: browserPageResponse.statusCode
+            )
+        }
+    }
+
+    private func verifyLANAccessBoundary(session: DshServiceSession) async throws {
+        let routeURL = session.url.appendingPathComponent("__dsh_swift/lan-url")
+        var request = runtimeHealthRequest(
+            url: routeURL,
+            method: "POST",
+            rendererToken: session.access.rendererToken
+        )
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let response = try await runtimeHealthResponse(for: request, label: "LAN URL 路由")
+        guard response.statusCode == 200 else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "开启状态的 LAN URL 路由",
+                expected: "200",
+                actual: response.statusCode
+            )
+        }
+        struct LANURLResponse: Decodable {
+            let url: URL
+        }
+        guard let payload = try? JSONDecoder().decode(LANURLResponse.self, from: response.body),
+              payload.url.scheme == "http",
+              let host = payload.url.host,
+              !host.isEmpty,
+              host != "127.0.0.1",
+              host != "localhost",
+              payload.url.port != nil else {
+            throw RuntimeHealthError.malformedLANURL
+        }
+    }
+
+    private func runtimeHealthRequest(
+        url: URL,
+        method: String = "GET",
+        rendererToken: String? = nil
+    ) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("application/json, text/html;q=0.9, */*;q=0.1", forHTTPHeaderField: "Accept")
+        if let rendererToken {
+            request.setValue("dsh_swift_renderer=\(rendererToken)", forHTTPHeaderField: "Cookie")
+        }
+        return request
+    }
+
+    private func runtimeHealthResponse(
+        for request: URLRequest,
+        label: String
+    ) async throws -> (statusCode: Int, body: Data) {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let (body, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw RuntimeHealthError.nonHTTPResponse(label)
+        }
+        return (httpResponse.statusCode, body)
     }
 
     public enum BrowserURLError: Error, LocalizedError {
@@ -376,7 +620,36 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     /// screen with real UI. The bridge activation callback is intentionally
     /// not used as the sole signal: Cordis can activate the desktop-host
     /// plugin before the page has finished rendering.
-    private func waitForWebUIReady(timeout: TimeInterval = 30) {
+    private func waitForWebUIReady(timeout: TimeInterval = 30) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            webUIReadyContinuation = continuation
+            webUIReadyTimeoutTask?.cancel()
+            webUIReadyTimeoutTask = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                } catch {
+                    return
+                }
+                guard let self, self.webUIReadyContinuation != nil else { return }
+                self.webUIReadinessGeneration &+= 1
+                self.completeWebUIReadiness(.failure(NSError(
+                    domain: "DshWebUI",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "DSH 页面加载超时，请重启 DSH 服务后重试。"]
+                )))
+            }
+        }
+    }
+
+    private func completeWebUIReadiness(_ result: Result<Void, Error>) {
+        let continuation = webUIReadyContinuation
+        webUIReadyContinuation = nil
+        webUIReadyTimeoutTask?.cancel()
+        webUIReadyTimeoutTask = nil
+        continuation?.resume(with: result)
+    }
+
+    private func beginWebUIReadinessCheck(timeout: TimeInterval = 30) {
         webUIReadinessGeneration &+= 1
         let generation = webUIReadinessGeneration
         let deadline = Date().addingTimeInterval(timeout)
@@ -398,13 +671,25 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                     let hasAppShell = (state?["hasAppShell"] as? NSNumber)?.boolValue ?? false
                     if !loading && length > 120 && hasAppShell {
                         self.revealWindow()
+                        self.completeWebUIReadiness(.success(()))
                         return
                     }
                     if Date() >= deadline {
                         if loading || length == 0 || !hasAppShell {
-                            self.showErrorAlert("DSH 页面加载超时，请重启 DSH 服务后重试。")
+                            let error = NSError(
+                                domain: "DshWebUI",
+                                code: -2,
+                                userInfo: [NSLocalizedDescriptionKey: "DSH 页面加载超时，请重启 DSH 服务后重试。"]
+                            )
+                            if self.webUIReadyContinuation != nil {
+                                self.webUIReadinessGeneration &+= 1
+                                self.completeWebUIReadiness(.failure(error))
+                            } else {
+                                self.showErrorAlert(error.localizedDescription)
+                            }
                         } else {
                             self.revealWindow()
+                            self.completeWebUIReadiness(.success(()))
                         }
                         return
                     }
@@ -576,7 +861,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         syncUiTheme()
         syncTranslateCommands()
-        waitForWebUIReady()
+        let matchesPendingNavigation = pendingWebUINavigation == nil
+            || (navigation != nil && navigation === pendingWebUINavigation)
+        guard matchesPendingNavigation else { return }
+        pendingWebUINavigation = nil
+        beginWebUIReadinessCheck()
     }
 
     @objc public func enableDeveloperTools() {
@@ -592,6 +881,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             print("[MainWindowController] Ignored expected navigation interruption:", error.localizedDescription)
             return
         }
+        let matchesPendingNavigation = pendingWebUINavigation == nil
+            || (navigation != nil && navigation === pendingWebUINavigation)
+        guard matchesPendingNavigation else { return }
+        pendingWebUINavigation = nil
+        let hadReadinessWaiter = webUIReadyContinuation != nil
+        completeWebUIReadiness(.failure(error))
+        guard !hadReadinessWaiter else { return }
         revealWindow()
         showErrorAlert("页面加载失败：\(error.localizedDescription)")
     }
@@ -601,6 +897,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             print("[MainWindowController] Ignored expected provisional navigation interruption:", error.localizedDescription)
             return
         }
+        let matchesPendingNavigation = pendingWebUINavigation == nil
+            || (navigation != nil && navigation === pendingWebUINavigation)
+        guard matchesPendingNavigation else { return }
+        pendingWebUINavigation = nil
+        let hadReadinessWaiter = webUIReadyContinuation != nil
+        completeWebUIReadiness(.failure(error))
+        guard !hadReadinessWaiter else { return }
         revealWindow()
         showErrorAlert("页面加载失败：\(error.localizedDescription)")
     }
@@ -856,16 +1159,34 @@ final class OnboardingViewModel: ObservableObject {
                 guard let latest = catalog.latest ?? catalog.versions.first?.version else {
                     throw NSError(domain: "Onboarding", code: -1, userInfo: [NSLocalizedDescriptionKey: "未能获取到最新版本号"])
                 }
+                guard let latestIntegrity = catalog.versions.first(where: { $0.version == latest })?.integrity else {
+                    throw NSError(domain: "Onboarding", code: -2, userInfo: [NSLocalizedDescriptionKey: "npm 版本目录缺少 DSH integrity，已拒绝安装"])
+                }
 
                 await MainActor.run {
                     self.statusText = "正在下载 DSH \(latest)..."
                 }
 
-                _ = try await DshVersionManager.shared.installVersion(version: latest, registry: registry) { progress in
+                _ = try await DshVersionManager.shared.installVersion(
+                    version: latest,
+                    registry: registry,
+                    expectedIntegrity: latestIntegrity
+                ) { progress in
                     Task { @MainActor in
                         self.statusText = progress.phase
                         self.detailText = progress.detail ?? ""
                     }
+                }
+
+                DshStateManager.shared.update { state in
+                    state.selectedVersion = latest
+                    state.runtimeState.active = NpmRuntimeDescriptor(
+                        version: latest,
+                        registry: DshVersionManager.normalizedRegistry(registry),
+                        integrity: latestIntegrity
+                    )
+                    state.runtimeState.pending = nil
+                    state.runtimeState.phase = .idle
                 }
 
                 await MainActor.run {

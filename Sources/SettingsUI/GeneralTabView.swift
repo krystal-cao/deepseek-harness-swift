@@ -63,29 +63,6 @@ public struct GeneralTabView: View {
                 footer: "这些选项会立即保存；服务相关的改动会在下次启动或重启时生效。"
             ) {
                 SettingsRow(
-                    title: viewModel.autoFollowLatest ? "自动更新已开启" : "自动更新已关闭",
-                    description: "启动后自动安装并切换到官方最新 RC，完成后重启 DSH 服务。"
-                ) {
-                    HStack(spacing: 0) {
-                        Spacer(minLength: 0)
-                        Toggle("", isOn: Binding(
-                            get: { viewModel.autoFollowLatest },
-                            set: {
-                                viewModel.autoFollowLatest = $0
-                                viewModel.saveGeneralSettings()
-                            }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .fixedSize()
-                    }
-                    .frame(width: 220, alignment: .trailing)
-                }
-
-                SettingsDivider()
-
-                SettingsRow(
                     title: viewModel.translateCommands ? "命令说明汉化已开启" : "命令说明汉化已关闭",
                     description: "将 /compact、/plan、/permission 等内置斜杠命令的说明提示显示为简体中文。"
                 ) {

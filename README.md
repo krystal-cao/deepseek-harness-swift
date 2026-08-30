@@ -63,7 +63,7 @@ DSH Swift Native Shell 是 DSH Desktop 的独立 Swift 原生 macOS 实现。它
 - **原生 macOS 窗口体验**：使用 AppKit 管理主窗口、交通灯、Dock 恢复、窗口拖拽、双击标题栏和独立设置窗口。
 - **SwiftUI 设置中心**：提供通用、版本、插件和关于页面，界面跟随系统深浅色模式。
 - **DSH 运行时管理**：应用包只内置 Node.js 和 pnpm，首次启动时从 npm Registry 下载并安装 DSH 运行时。
-- **版本切换与回滚**：支持官方 DSH 版本安装、切换、卸载和自动跟随 npm latest；切换失败时会恢复原版本并尝试恢复服务。
+- **DSH Runtime 更新**：首次启动和后续更新均从 npm Registry 获取 DSH 插件族；更新先安装 candidate，完成 Node/control、Renderer HTTP、匿名拒绝、Browser/LAN 边界和 Web UI 验证后才确认，失败时恢复完整的 Runtime 与 web Profile 快照，并暂时抑制失败版本。
 - **插件管理**：支持 web profile 插件的安装、更新、卸载和服务重启，桥接插件随应用内置。
 - **桌面通知**：支持 DSH 任务完成通知，并可从通知恢复应用窗口。
 - **Sparkle 更新**：Swift 应用包使用 Sparkle 提供检查更新和签名更新；应用版本与 DSH npm 运行时版本彼此独立。
@@ -135,7 +135,8 @@ npm test
 ## 版本与更新
 
 - Swift 应用版本和构建号独立维护在 [Version.xcconfig](Version.xcconfig) 中。
-- Swift 应用版本不等同于 DSH npm 运行时版本；后者在应用内的版本管理页单独安装和切换。
+- Swift 应用版本不等同于 DSH npm 运行时版本；后者在应用内的版本管理页单独检查并升级到 npm `latest` 或用户明确选择的 `next`。启动、插件操作和 Runtime 更新共享串行事务门，避免并发重启。
+- Runtime 版本目录以 npm Registry 为唯一来源；当前只接受 stable 与 `rc.N` 版本，GitHub 独有版本、alpha/beta 及任意降级暂不参与运行时选择。
 - Sparkle 公钥写入 [Info.plist](Info.plist)，Ed25519 私钥只保存在发布机器的 Keychain 中，禁止提交到仓库。
 - 当前更新 feed 位于 `appcast-swift.xml`，发布新版本时需要先构建两个架构的 DMG，再使用 Sparkle `sign_update` 生成签名并更新 feed。
 
@@ -144,6 +145,7 @@ npm test
 - 当前使用 ad-hoc 签名，未提供 Developer ID 签名和 notarization。
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - 应用更新和 DSH npm 运行时更新是两套独立流程。
+- 当前只提供从已安装 Runtime 向 npm `latest`/`next` tag 的单向升级；默认仅通知不自动安装，`next` 只能由用户明确选择；更新失败的版本会抑制到 npm tag 变化、应用升级或用户手动重试；旧版本会保留到新 Runtime 连续两次成功启动后自动清理，暂不提供任意版本切换、卸载或降级入口。
 - 目前仅提供 macOS 13+、Apple Silicon 与 Intel 构建。
 
 ## 许可证

@@ -11,8 +11,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = AppUpdateManager.shared
         setupAppMenu()
         NotificationManager.shared.requestAuthorization()
-        MainWindowController.shared.launch()
         Task { @MainActor in
+            // Recovery and Profile cleanup can touch thousands of files. Keep
+            // the UI responsive and let MainWindowController perform the one
+            // actual snapshot restore immediately before the old Runtime is
+            // started.
+            await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
+            await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
+            _ = await Task.detached(priority: .utility) {
+                DshVersionManager.shared.cleanupUnreferencedVersions()
+            }.value
+            _ = await DshPluginManager.shared.cleanupOrphanedWebProfileSnapshots(
+                keeping: DshStateManager.shared.current.runtimeState.webProfileSnapshotID
+            )
+            MainWindowController.shared.launch()
             await SettingsViewModel.shared.refreshCatalog()
             await SettingsViewModel.shared.followLatestIfEnabled()
         }

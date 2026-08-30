@@ -7,6 +7,20 @@ public extension Notification.Name {
     static let dshSettingsPanelDidChange = Notification.Name("dsh.settingsPanelDidChange")
 }
 
+private enum DshRuntimeUpdateFailure: LocalizedError {
+    case candidateInstall(version: String, detail: String)
+    case runtimeStartup(version: String, detail: String)
+
+    var errorDescription: String? {
+        switch self {
+        case .candidateInstall(let version, let detail):
+            return "candidate Runtime \(version) 安装失败，当前仍使用原版本：\(detail)"
+        case .runtimeStartup(let version, let detail):
+            return "新 Runtime \(version) 启动或健康检查失败，已尝试恢复旧版本：\(detail)"
+        }
+    }
+}
+
 @MainActor
 public final class SettingsViewModel: ObservableObject {
     public static let shared = SettingsViewModel()
@@ -17,7 +31,9 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var selectedVersion: String? = nil
     @Published public var selectedCategoryIndex: Int = 0
     @Published public var latestVersion: String? = nil
+    @Published public var nextVersion: String? = nil
     @Published public var autoFollowLatest: Bool = false
+    @Published public var runtimeChannel: DshRuntimeChannel = .latest
     @Published public var npmRegistry: String = DshVersionManager.defaultRegistry
     @Published public var dshPort: Int = 3080
     @Published public var browserAccessEnabled: Bool = false
@@ -35,10 +51,8 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var outdatedPluginsMap: [String: String] = [:]
 
     @Published public var isInstallingVersion: Bool = false
-    @Published public var isSwitchingVersion: Bool = false
-    @Published public var isUninstallingVersion: Bool = false
+    @Published public var isUpdatingRuntime: Bool = false
     @Published public var installingVersionName: String? = nil
-    @Published public var uninstallingVersionName: String? = nil
     @Published public var installProgressPhase: String = ""
     @Published public var installProgressDetail: String? = nil
 
@@ -51,8 +65,13 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var alertMessage: String? = nil
 
     private var isFollowingLatest = false
+    private var catalogRequestGeneration = 0
     private var pluginStatusDismissTask: Task<Void, Never>?
     private var pluginStatusGeneration = 0
+
+    private var currentAppVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    }
 
     private init() {
         if let savedPanel = UserDefaults.standard.object(forKey: Self.selectedPanelDefaultsKey) as? Int,
@@ -71,7 +90,9 @@ public final class SettingsViewModel: ObservableObject {
     public func loadFromState() {
         let state = DshStateManager.shared.current
         self.selectedVersion = DshVersionManager.shared.ensureSelection()
-        self.autoFollowLatest = state.autoFollowLatest
+        self.runtimeChannel = state.runtimeState.channel
+        self.autoFollowLatest = self.runtimeChannel == .latest
+            && state.runtimeState.updatePolicy == .automaticStable
         self.npmRegistry = state.npmRegistry ?? DshVersionManager.defaultRegistry
         self.dshPort = state.dshPort ?? 3080
         self.browserAccessEnabled = state.browserAccessEnabled
@@ -82,6 +103,11 @@ public final class SettingsViewModel: ObservableObject {
         self.translateCommands = state.translateCommands
         self.installedVersions = DshVersionManager.shared.listInstalledVersions()
         self.installedPlugins = DshPluginManager.shared.listPlugins(outdatedMap: outdatedPluginsMap)
+
+        if let diagnostic = DshStateManager.shared.current.runtimeState.lastDiagnostic {
+            self.alertMessage = diagnostic
+            DshStateManager.shared.update { $0.runtimeState.lastDiagnostic = nil }
+        }
     }
 
     /// Refresh the profile-based theme state after plugin changes or when the
@@ -101,16 +127,29 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func refreshCatalog() async {
+        let registry = DshVersionManager.normalizedRegistry(npmRegistry)
+        catalogRequestGeneration &+= 1
+        let requestGeneration = catalogRequestGeneration
         isLoadingCatalog = true
         let startedAt = Date()
-        defer { isLoadingCatalog = false }
+        defer {
+            if requestGeneration == catalogRequestGeneration {
+                isLoadingCatalog = false
+            }
+        }
         do {
-            let res = try await DshVersionManager.shared.fetchCatalog(registry: npmRegistry)
+            let res = try await DshVersionManager.shared.fetchCatalog(registry: registry)
+            guard requestGeneration == catalogRequestGeneration,
+                  DshVersionManager.normalizedRegistry(npmRegistry) == registry else { return }
             self.latestVersion = res.latest
+            self.nextVersion = res.next
             self.availableVersions = res.versions
             self.installedVersions = DshVersionManager.shared.listInstalledVersions()
         } catch {
-            self.alertMessage = error.localizedDescription
+            if requestGeneration == catalogRequestGeneration,
+               DshVersionManager.normalizedRegistry(npmRegistry) == registry {
+                self.alertMessage = error.localizedDescription
+            }
         }
         await holdRefreshAnimation(since: startedAt)
     }
@@ -151,10 +190,12 @@ public final class SettingsViewModel: ObservableObject {
         operatingPluginName = "正在更新 \(name)…"
         Task {
             do {
-                try await DshPluginManager.shared.updatePlugin(name: name)
-                self.outdatedPluginsMap.removeValue(forKey: name)
-                self.refreshPlugins()
-                try await self.restartDshServiceAndWait()
+                try await MainWindowController.shared.withRuntimeOperation {
+                    try await DshPluginManager.shared.updatePlugin(name: name)
+                    self.outdatedPluginsMap.removeValue(forKey: name)
+                    self.refreshPlugins()
+                    try await self.restartDshServiceDuringOperationAndWait()
+                }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
                 self.showPluginStatus("插件 \(name) 更新成功，服务已重启")
@@ -174,10 +215,12 @@ public final class SettingsViewModel: ObservableObject {
         operatingPluginName = "正在更新插件（0/\(count)）…"
         Task {
             do {
-                try await DshPluginManager.shared.updateAllPlugins()
-                self.outdatedPluginsMap.removeAll()
-                self.refreshPlugins()
-                try await self.restartDshServiceAndWait()
+                try await MainWindowController.shared.withRuntimeOperation {
+                    try await DshPluginManager.shared.updateAllPlugins()
+                    self.outdatedPluginsMap.removeAll()
+                    self.refreshPlugins()
+                    try await self.restartDshServiceDuringOperationAndWait()
+                }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
                 self.showPluginStatus("全部插件已更新至最新版本，服务已重启")
@@ -189,137 +232,576 @@ public final class SettingsViewModel: ObservableObject {
         }
     }
 
-    public func installVersion(_ version: String) {
-        guard !isInstallingVersion else { return }
-        isInstallingVersion = true
-        installingVersionName = version
-        installProgressPhase = "准备安装 DSH \(version)..."
-        installProgressDetail = nil
-
-        Task { [self] in
-            do {
-                let selectedByInstall = try await DshVersionManager.shared.installVersion(version: version, registry: npmRegistry) { progress in
-                    Task { @MainActor in
-                        self.installProgressPhase = progress.phase
-                        self.installProgressDetail = progress.detail
-                    }
-                }
-                self.loadFromState()
-                await self.refreshCatalog()
-                if selectedByInstall {
-                    try await self.restartDshServiceAndWait()
-                }
-                self.isInstallingVersion = false
-                self.installingVersionName = nil
-            } catch {
-                self.isInstallingVersion = false
-                self.installingVersionName = nil
-                self.alertMessage = "安装版本失败：\(error.localizedDescription)"
-            }
-        }
+    /// Start a one-way update to the selected npm `latest` version. The
+    /// settings UI deliberately has no arbitrary install/switch/downgrade
+    /// action anymore.
+    public func updateToLatest() {
+        updateToChannel(.latest)
     }
 
-    public func selectVersion(_ version: String) {
-        guard !isInstallingVersion, !isSwitchingVersion, !isUninstallingVersion else { return }
-        guard DshVersionManager.shared.isVersionInstalled(version) else {
-            alertMessage = "该版本尚未安装"
+    public func updateToSelectedChannel() {
+        updateToChannel(runtimeChannel)
+    }
+
+    private func updateToChannel(_ channel: DshRuntimeChannel) {
+        let targetVersion = channel == .next ? nextVersion : latestVersion
+        guard let targetVersion,
+              let item = availableVersions.first(where: { $0.version == targetVersion }) else {
+            alertMessage = "尚未获取到可用的 npm 更新。"
             return
         }
-        let previous = DshStateManager.shared.current.selectedVersion
-        guard previous != version else { return }
-
-        isSwitchingVersion = true
-        DshStateManager.shared.update { $0.selectedVersion = version }
-        selectedVersion = version
-        installedVersions = DshVersionManager.shared.listInstalledVersions()
-
-        Task { [self] in
-            do {
-                try await restartDshServiceAndWait()
-                self.loadFromState()
-                await self.refreshCatalog()
-                self.isSwitchingVersion = false
-            } catch {
-                DshStateManager.shared.update { $0.selectedVersion = previous }
-                self.loadFromState()
-                await self.refreshCatalog()
-                self.isSwitchingVersion = false
-                self.alertMessage = "切换版本失败：\(error.localizedDescription)"
-                if previous != nil {
-                    try? await self.restartDshServiceAndWait()
-                }
-            }
-        }
+        Task { [self] in await runRuntimeUpdate(item) }
     }
 
-    /// Match Electron's startup auto-follow behavior. With no bundled DSH,
-    /// this only runs when a valid user-installed current version exists.
+    /// Update to a catalog version only when it is strictly newer than the
+    /// active runtime. This remains separate from the UI so future channels
+    /// can reuse the same transaction without restoring arbitrary switching.
+    public func updateToVersion(_ version: String) {
+        let selectedTarget = runtimeChannel == .next ? nextVersion : latestVersion
+        guard version == selectedTarget,
+              let item = availableVersions.first(where: { $0.version == version }) else {
+            alertMessage = "只能更新到当前选定通道的 npm tag 版本。"
+            return
+        }
+        Task { [self] in await runRuntimeUpdate(item) }
+    }
+
+    /// Match startup auto-follow behavior while using the same persisted
+    /// transaction as a manual update.
     public func followLatestIfEnabled() async {
+        let state = DshStateManager.shared.current
         guard autoFollowLatest,
-              !isInstallingVersion,
-              !isSwitchingVersion,
+              state.runtimeState.channel == .latest,
+              state.runtimeState.pending == nil,
               !isFollowingLatest,
               let latest = latestVersion,
-              let current = DshStateManager.shared.current.selectedVersion,
+              let item = availableVersions.first(where: { $0.version == latest }),
+              !(state.runtimeState.dismissedVersion == latest
+                  && state.runtimeState.dismissedAppVersion == currentAppVersion),
+              let current = state.selectedVersion,
               DshVersionManager.shared.isVersionInstalled(current),
               DshVersionManager.shared.isVersionNewer(latest, than: current) else { return }
 
         isFollowingLatest = true
         defer { isFollowingLatest = false }
-        isInstallingVersion = true
-        installingVersionName = latest
-        installProgressPhase = "准备自动更新 DSH \(latest)..."
-        installProgressDetail = nil
-        do {
-            _ = try await DshVersionManager.shared.installVersion(version: latest, registry: npmRegistry) { progress in
-                Task { @MainActor in
-                    self.installProgressPhase = progress.phase
-                    self.installProgressDetail = progress.detail
-                }
-            }
-            DshStateManager.shared.update { $0.selectedVersion = latest }
-            selectedVersion = latest
-            installedVersions = DshVersionManager.shared.listInstalledVersions()
-            try await restartDshServiceAndWait()
-            isInstallingVersion = false
-            installingVersionName = nil
-        } catch {
-            DshStateManager.shared.update { $0.selectedVersion = current }
-            selectedVersion = current
-            isInstallingVersion = false
-            installingVersionName = nil
-            try? await restartDshServiceAndWait()
-            alertMessage = "自动更新 DSH 失败：\(error.localizedDescription)"
-        }
+        await runRuntimeUpdate(item, isAutomatic: true)
     }
 
-    public func uninstallVersion(_ version: String) {
-        guard !isInstallingVersion, !isSwitchingVersion, !isUninstallingVersion else { return }
-        isUninstallingVersion = true
-        uninstallingVersionName = version
-        Task { [self] in
-            do {
-                try await performUninstall(version)
-                self.loadFromState()
-                await self.refreshCatalog()
-            } catch {
-                self.alertMessage = "卸载失败：\(error.localizedDescription)"
-            }
-            self.isUninstallingVersion = false
-            self.uninstallingVersionName = nil
-        }
-    }
+    /// If the app was terminated during an update, restore the last known
+    /// active runtime before the next service launch. A confirmed transaction
+    /// is simply finalized; all earlier phases are treated as unconfirmed.
+    public func recoverPendingRuntimeUpdate() async {
+        let state = DshStateManager.shared.current
+        let installedVersions = Set(DshVersionManager.shared.listInstalledVersions())
+        guard let action = DshRuntimeRecoveryPlanner.plan(
+            state: state,
+            installedVersions: installedVersions
+        ) else { return }
 
-    private func performUninstall(_ version: String) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+        switch action {
+        case .finalizeConfirmed(let active):
+            DshStateManager.shared.update { state in
+                state.runtimeState.pending = nil
+                // Keep confirmed until the next healthy start can count
+                // toward previous/Profile cleanup.
+                state.runtimeState.phase = .confirmed
+                state.runtimeState.active = active
+                state.runtimeState.healthyStartCount = 1
+            }
+
+        case .rollback(let active, _):
+            let message = "检测到上次 Runtime 更新在\(recoveryPhaseDescription(state.runtimeState.phase))中断，将恢复到 \(active.version)。"
+            DshStateManager.shared.update { state in
+                state.selectedVersion = active.version
+                state.runtimeState.active = active
+                state.runtimeState = DshRuntimeTransaction.recordRollbackFailure(
+                    state.runtimeState,
+                    diagnostic: message
+                )
+            }
+
+            // Keep rollingBack/previous/pending until the previous Runtime
+            // actually passes the normal startup health gate. MainWindowController
+            // owns the single restore operation immediately before that start;
+            // doing it here as well would restore the 4 GB Profile twice.
+            self.alertMessage = "\(message) 已准备恢复，正在验证旧 Runtime。"
+
+        case .reset(let candidate):
+            let message = "检测到上次 Runtime 更新在\(recoveryPhaseDescription(state.runtimeState.phase))中断，且没有可用的回滚 Runtime，请重新安装。"
+            let snapshotID = state.runtimeState.webProfileSnapshotID
+            if let snapshotID {
                 do {
-                    try DshVersionManager.shared.uninstallVersion(version: version)
-                    continuation.resume()
+                    try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID) { progress in
+                        Task { @MainActor in
+                            self.installProgressPhase = progress.phase
+                            self.installProgressDetail = progress.detail
+                        }
+                    }
                 } catch {
-                    continuation.resume(throwing: error)
+                    let diagnostic = "\(message) 但 web Profile 恢复失败，事务仍保留待下次启动重试：\(error.localizedDescription)"
+                    DshStateManager.shared.update { state in
+                        state.runtimeState = DshRuntimeTransaction.recordRollbackFailure(
+                            state.runtimeState,
+                            diagnostic: diagnostic
+                        )
+                    }
+                    self.alertMessage = diagnostic
+                    return
                 }
             }
+            DshStateManager.shared.update { state in
+                state.selectedVersion = nil
+                state.runtimeState.active = nil
+                state.runtimeState.pending = nil
+                state.runtimeState.previous = nil
+                state.runtimeState.phase = .idle
+                state.runtimeState.webProfileSnapshotID = nil
+                state.runtimeState.healthyStartCount = 0
+                state.runtimeState.lastDiagnostic = message
+            }
+            var finalMessage = message
+            do {
+                try DshVersionManager.shared.discardInstalledVersion(candidate.version)
+            } catch {
+                finalMessage += " Candidate \(candidate.version) 清理失败：\(error.localizedDescription)"
+                DshStateManager.shared.update { $0.runtimeState.lastDiagnostic = finalMessage }
+            }
+            if let snapshotID {
+                do {
+                    try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
+                } catch {
+                    finalMessage += " web Profile 快照清理失败：\(error.localizedDescription)"
+                    DshStateManager.shared.update { state in
+                        state.runtimeState.webProfileSnapshotID = snapshotID
+                        state.runtimeState.lastDiagnostic = finalMessage
+                    }
+                }
+            }
+            self.alertMessage = finalMessage
+        }
+    }
+
+    private func recoveryPhaseDescription(_ phase: DshRuntimeTransactionPhase) -> String {
+        switch phase {
+        case .staging:
+            return " candidate 安装阶段"
+        case .switching, .verifying:
+            return "新 Runtime 启动/健康验证阶段"
+        case .rollingBack:
+            return "回滚阶段"
+        case .confirmed:
+            return "确认阶段"
+        case .idle:
+            return "未知阶段"
+        }
+    }
+
+    private func runtimeTransactionMatches(
+        _ state: DshStateConfig,
+        phase: DshRuntimeTransactionPhase,
+        selectedVersion: String?,
+        activeVersion: String?,
+        previousVersion: String?,
+        pendingVersion: String?,
+        snapshotID: String?
+    ) -> Bool {
+        state.selectedVersion == selectedVersion
+            && state.runtimeState.phase == phase
+            && state.runtimeState.active?.version == activeVersion
+            && state.runtimeState.previous?.version == previousVersion
+            && state.runtimeState.pending?.version == pendingVersion
+            && state.runtimeState.webProfileSnapshotID == snapshotID
+    }
+
+    /// Count a successful app/service start after an update. Keep the old
+    /// runtime until the new one has survived two starts, then remove only
+    /// the exact recorded previous directory.
+    public func recordHealthyRuntimeStart() async {
+        let state = DshStateManager.shared.current
+        guard state.runtimeState.phase == .confirmed,
+              let previous = state.runtimeState.previous else { return }
+
+        let expectedSelectedVersion = state.selectedVersion
+        let expectedActiveVersion = state.runtimeState.active?.version
+        let expectedPreviousVersion = previous.version
+        let expectedPendingVersion = state.runtimeState.pending?.version
+        let expectedSnapshotID = state.runtimeState.webProfileSnapshotID
+        let nextCount = state.runtimeState.healthyStartCount + 1
+        guard nextCount >= 2 else {
+            DshStateManager.shared.update { state in
+                guard self.runtimeTransactionMatches(
+                    state,
+                    phase: .confirmed,
+                    selectedVersion: expectedSelectedVersion,
+                    activeVersion: expectedActiveVersion,
+                    previousVersion: expectedPreviousVersion,
+                    pendingVersion: expectedPendingVersion,
+                    snapshotID: expectedSnapshotID
+                ), state.runtimeState.healthyStartCount == nextCount - 1 else { return }
+                state.runtimeState.healthyStartCount = nextCount
+            }
+            return
+        }
+
+        let snapshotID = expectedSnapshotID
+        var snapshotCleanupError: Error?
+        if let snapshotID {
+            do {
+                try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
+            } catch {
+                snapshotCleanupError = error
+            }
+        }
+
+        let stateAfterSnapshotCleanup = DshStateManager.shared.current
+        guard runtimeTransactionMatches(
+            stateAfterSnapshotCleanup,
+            phase: .confirmed,
+            selectedVersion: expectedSelectedVersion,
+            activeVersion: expectedActiveVersion,
+            previousVersion: expectedPreviousVersion,
+            pendingVersion: expectedPendingVersion,
+            snapshotID: expectedSnapshotID
+        ), stateAfterSnapshotCleanup.runtimeState.healthyStartCount == nextCount - 1 else { return }
+
+        do {
+            try DshVersionManager.shared.discardInstalledVersion(previous.version)
+            var didCommit = false
+            DshStateManager.shared.update { state in
+                guard self.runtimeTransactionMatches(
+                    state,
+                    phase: .confirmed,
+                    selectedVersion: expectedSelectedVersion,
+                    activeVersion: expectedActiveVersion,
+                    previousVersion: expectedPreviousVersion,
+                    pendingVersion: expectedPendingVersion,
+                    snapshotID: expectedSnapshotID
+                ), state.runtimeState.healthyStartCount == nextCount - 1 else { return }
+                didCommit = true
+                state.runtimeState.previous = nil
+                state.runtimeState.healthyStartCount = 0
+                state.runtimeState.phase = .idle
+                state.runtimeState.webProfileSnapshotID = snapshotCleanupError == nil ? nil : snapshotID
+                state.runtimeState.lastDiagnostic = snapshotCleanupError.map {
+                    "旧 Runtime 已清理，但 web Profile 快照清理失败：\($0.localizedDescription)"
+                }
+            }
+            guard didCommit else { return }
+        } catch {
+            DshStateManager.shared.update { state in
+                guard self.runtimeTransactionMatches(
+                    state,
+                    phase: .confirmed,
+                    selectedVersion: expectedSelectedVersion,
+                    activeVersion: expectedActiveVersion,
+                    previousVersion: expectedPreviousVersion,
+                    pendingVersion: expectedPendingVersion,
+                    snapshotID: expectedSnapshotID
+                ) else { return }
+                state.runtimeState.healthyStartCount = nextCount
+            }
+            self.alertMessage = "新 Runtime 已连续启动，但旧 Runtime 清理失败：\(error.localizedDescription)"
+        }
+    }
+
+    /// Retry a snapshot deletion that previously failed after the Runtime
+    /// transaction itself had already settled. Keep the ID in state until the
+    /// delete really succeeds so startup cleanup never turns a multi-GB
+    /// snapshot into an untracked leak.
+    public func retryRetainedWebProfileSnapshotCleanup() async {
+        let state = DshStateManager.shared.current
+        guard state.runtimeState.pending == nil,
+              state.runtimeState.phase == .idle,
+              let snapshotID = state.runtimeState.webProfileSnapshotID else { return }
+
+        do {
+            try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
+            DshStateManager.shared.update { state in
+                guard state.runtimeState.pending == nil,
+                      state.runtimeState.webProfileSnapshotID == snapshotID else { return }
+                state.runtimeState.webProfileSnapshotID = nil
+                state.runtimeState.lastDiagnostic = nil
+            }
+        } catch {
+            alertMessage = "web Profile 快照清理仍失败，将在下次启动继续重试：\(error.localizedDescription)"
+        }
+    }
+
+    /// Finish a rollback that was left pending because the previous process
+    /// could not be started during the original update attempt. The next app
+    /// launch restores the Profile before starting the previous Runtime; once
+    /// that start is healthy, this method can safely settle the transaction.
+    public func finalizeRecoveredRuntimeAfterSuccessfulStart() async {
+        let state = DshStateManager.shared.current
+        guard state.runtimeState.phase == .rollingBack,
+              let active = state.runtimeState.previous,
+              let candidate = state.runtimeState.pending,
+              state.selectedVersion == active.version else { return }
+
+        let expectedSelectedVersion = state.selectedVersion
+        let expectedActiveVersion = state.runtimeState.active?.version
+        let expectedPreviousVersion = active.version
+        let expectedPendingVersion = candidate.version
+        let snapshotID = state.runtimeState.webProfileSnapshotID
+        var cleanupErrors: [String] = []
+        do {
+            try DshVersionManager.shared.discardInstalledVersion(candidate.version)
+        } catch {
+            cleanupErrors.append("candidate 清理失败：\(error.localizedDescription)")
+        }
+
+        var retainedSnapshotID: String?
+        if let snapshotID {
+            do {
+                try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
+            } catch {
+                retainedSnapshotID = snapshotID
+                cleanupErrors.append("web Profile 快照清理失败：\(error.localizedDescription)")
+            }
+        }
+
+        let stateBeforeCommit = DshStateManager.shared.current
+        guard runtimeTransactionMatches(
+            stateBeforeCommit,
+            phase: .rollingBack,
+            selectedVersion: expectedSelectedVersion,
+            activeVersion: expectedActiveVersion,
+            previousVersion: expectedPreviousVersion,
+            pendingVersion: expectedPendingVersion,
+            snapshotID: snapshotID
+        ) else { return }
+
+        let diagnostic = cleanupErrors.isEmpty ? nil : cleanupErrors.joined(separator: "；")
+        var didCommit = false
+        DshStateManager.shared.update { state in
+            guard self.runtimeTransactionMatches(
+                state,
+                phase: .rollingBack,
+                selectedVersion: expectedSelectedVersion,
+                activeVersion: expectedActiveVersion,
+                previousVersion: expectedPreviousVersion,
+                pendingVersion: expectedPendingVersion,
+                snapshotID: snapshotID
+            ) else { return }
+            didCommit = true
+            state.runtimeState = DshRuntimeTransaction.finishRollback(
+                state.runtimeState,
+                active: active,
+                retainedWebProfileSnapshotID: retainedSnapshotID
+            )
+            state.runtimeState.lastDiagnostic = diagnostic
+        }
+        guard didCommit else { return }
+        if let diagnostic {
+            alertMessage = "已恢复到 \(active.version)，但\(diagnostic)"
+        }
+    }
+
+    private func runRuntimeUpdate(_ item: DshVersionItem, isAutomatic: Bool = false) async {
+        guard !isUpdatingRuntime else { return }
+        guard DshStateManager.shared.current.runtimeState.pending == nil else {
+            alertMessage = "上一次 Runtime 更新尚未完成恢复，请重启 DSH 后再重试。"
+            return
+        }
+        guard let currentVersion = DshStateManager.shared.current.selectedVersion,
+              DshVersionManager.shared.isVersionInstalled(currentVersion) else {
+            alertMessage = "当前没有可用于升级的 DSH Runtime。"
+            return
+        }
+        guard DshVersionManager.shared.isVersionNewer(item.version, than: currentVersion) else {
+            alertMessage = "当前已经是该 Registry 中不低于目标版本的 Runtime。"
+            return
+        }
+
+        if isAutomatic {
+            let state = DshStateManager.shared.current
+            guard !(state.runtimeState.dismissedVersion == item.version
+                && state.runtimeState.dismissedAppVersion == currentAppVersion) else { return }
+        } else {
+            // The update button is the explicit user retry path for a
+            // previously suppressed candidate.
+            DshStateManager.shared.update { state in
+                state.runtimeState.dismissedVersion = nil
+                state.runtimeState.dismissedAppVersion = nil
+            }
+        }
+
+        isUpdatingRuntime = true
+        isInstallingVersion = true
+        installingVersionName = item.version
+        installProgressPhase = "准备更新 DSH \(item.version)..."
+        installProgressDetail = nil
+
+        do {
+            try await performRuntimeUpdate(item, currentVersion: currentVersion)
+            loadFromState()
+            await refreshCatalog()
+        } catch {
+            // performRuntimeUpdate includes the active/candidate versions and
+            // whether rollback or cleanup also failed. Keep that diagnostic
+            // intact instead of prefixing it with a duplicate failure label.
+            DshStateManager.shared.update { state in
+                state.runtimeState.dismissedVersion = item.version
+                state.runtimeState.dismissedAppVersion = currentAppVersion
+            }
+            alertMessage = error.localizedDescription
+        }
+
+        isUpdatingRuntime = false
+        isInstallingVersion = false
+        installingVersionName = nil
+    }
+
+    private func performRuntimeUpdate(_ item: DshVersionItem, currentVersion: String) async throws {
+        try await MainWindowController.shared.withRuntimeOperation {
+            try await self.performRuntimeUpdateDuringOperation(item, currentVersion: currentVersion)
+        }
+    }
+
+    private func performRuntimeUpdateDuringOperation(_ item: DshVersionItem, currentVersion: String) async throws {
+        let registry = DshVersionManager.normalizedRegistry(npmRegistry)
+        let state = DshStateManager.shared.current
+        guard let integrity = item.integrity else {
+            throw NSError(
+                domain: "DshRuntimeUpdate",
+                code: -4,
+                userInfo: [NSLocalizedDescriptionKey: "npm 版本目录缺少 DSH integrity，已拒绝更新"]
+            )
+        }
+        let active = state.runtimeState.active ?? NpmRuntimeDescriptor(
+            version: currentVersion,
+            registry: registry,
+            integrity: nil
+        )
+        let candidate = NpmRuntimeDescriptor(
+            version: item.version,
+            registry: registry,
+            integrity: integrity
+        )
+
+        let transaction = DshRuntimeTransaction.begin(
+            active: active,
+            candidate: candidate,
+            updatePolicy: state.runtimeState.updatePolicy,
+            channel: state.runtimeState.channel
+        )
+        DshStateManager.shared.update { state in
+            state.runtimeState = transaction
+        }
+
+        var candidateActivated = false
+        do {
+            do {
+                try await DshVersionManager.shared.installCandidate(
+                    version: item.version,
+                    registry: registry,
+                    expectedIntegrity: integrity
+                ) { progress in
+                    Task { @MainActor in
+                        self.installProgressPhase = progress.phase
+                        self.installProgressDetail = progress.detail
+                    }
+                }
+            } catch {
+                throw DshRuntimeUpdateFailure.candidateInstall(
+                    version: item.version,
+                    detail: error.localizedDescription
+                )
+            }
+
+            DshStateManager.shared.update { state in
+                state.selectedVersion = item.version
+                state.runtimeState = DshRuntimeTransaction.activateCandidate(state.runtimeState)
+            }
+            candidateActivated = true
+            DshStateManager.shared.update {
+                $0.runtimeState = DshRuntimeTransaction.beginVerification($0.runtimeState)
+            }
+            do {
+                try await restartDshServiceDuringOperationAndWait()
+            } catch {
+                throw DshRuntimeUpdateFailure.runtimeStartup(
+                    version: item.version,
+                    detail: error.localizedDescription
+                )
+            }
+
+            DshStateManager.shared.update { state in
+                state.runtimeState = DshRuntimeTransaction.confirm(state.runtimeState)
+            }
+        } catch {
+            let failureDescription = error.localizedDescription
+            DshStateManager.shared.update { state in
+                state.selectedVersion = currentVersion
+                state.runtimeState = DshRuntimeTransaction.beginRollback(state.runtimeState)
+            }
+            var rollbackError: Error?
+            if candidateActivated {
+                // Do not let pnpm or a running candidate keep files open while
+                // the pre-transaction Profile snapshot is being restored.
+                DshService.shared.stop()
+                do {
+                    try await restartDshServiceDuringOperationAndWait()
+                } catch {
+                    rollbackError = error
+                }
+            }
+            if let rollbackError {
+                let diagnostic = "Runtime 回滚失败：\(rollbackError.localizedDescription)"
+                DshStateManager.shared.update { state in
+                    state.runtimeState = DshRuntimeTransaction.recordRollbackFailure(
+                        state.runtimeState,
+                        diagnostic: diagnostic
+                    )
+                    state.runtimeState.dismissedVersion = item.version
+                    state.runtimeState.dismissedAppVersion = currentAppVersion
+                }
+                throw NSError(
+                    domain: "DshRuntimeUpdate",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "更新到 \(item.version) 失败：\(failureDescription)；自动恢复 \(active.version) 也失败：\(rollbackError.localizedDescription)"]
+                )
+            }
+
+            var cleanupErrors: [String] = []
+            do {
+                try DshVersionManager.shared.discardInstalledVersion(item.version)
+            } catch {
+                cleanupErrors.append("candidate 清理失败：\(error.localizedDescription)")
+            }
+            let snapshotID = DshStateManager.shared.current.runtimeState.webProfileSnapshotID
+            var retainedSnapshotID: String?
+            if let snapshotID {
+                do {
+                    try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
+                } catch {
+                    retainedSnapshotID = snapshotID
+                    cleanupErrors.append("web Profile 快照清理失败：\(error.localizedDescription)")
+                }
+            }
+            let cleanupDiagnostic = cleanupErrors.isEmpty ? nil : cleanupErrors.joined(separator: "；")
+            DshStateManager.shared.update { state in
+                state.runtimeState = DshRuntimeTransaction.finishRollback(
+                    state.runtimeState,
+                    active: active,
+                    retainedWebProfileSnapshotID: retainedSnapshotID
+                )
+                state.runtimeState.dismissedVersion = item.version
+                state.runtimeState.dismissedAppVersion = currentAppVersion
+                state.runtimeState.lastDiagnostic = cleanupDiagnostic
+            }
+            if let cleanupDiagnostic {
+                throw NSError(
+                    domain: "DshRuntimeUpdate",
+                    code: -3,
+                    userInfo: [NSLocalizedDescriptionKey: "更新到 \(item.version) 失败，已恢复 \(active.version)，但\(cleanupDiagnostic)"]
+                )
+            }
+            throw NSError(
+                domain: "DshRuntimeUpdate",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "更新到 \(item.version) 失败，已自动恢复 \(active.version)：\(failureDescription)"]
+            )
         }
     }
 
@@ -330,9 +812,11 @@ public final class SettingsViewModel: ObservableObject {
         operatingPluginName = "正在安装插件 \(spec)…"
         Task {
             do {
-                try await DshPluginManager.shared.addPlugin(spec: spec)
-                self.refreshPlugins()
-                try await self.restartDshServiceAndWait()
+                try await MainWindowController.shared.withRuntimeOperation {
+                    try await DshPluginManager.shared.addPlugin(spec: spec)
+                    self.refreshPlugins()
+                    try await self.restartDshServiceDuringOperationAndWait()
+                }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
                 self.showPluginStatus("插件 \(spec) 安装成功，服务已重启")
@@ -352,10 +836,12 @@ public final class SettingsViewModel: ObservableObject {
         operatingPluginName = "正在卸载插件 \(name)…"
         Task {
             do {
-                try await DshPluginManager.shared.removePlugin(name: name)
-                self.outdatedPluginsMap.removeValue(forKey: name)
-                self.refreshPlugins()
-                try await self.restartDshServiceAndWait()
+                try await MainWindowController.shared.withRuntimeOperation {
+                    try await DshPluginManager.shared.removePlugin(name: name)
+                    self.outdatedPluginsMap.removeValue(forKey: name)
+                    self.refreshPlugins()
+                    try await self.restartDshServiceDuringOperationAndWait()
+                }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
                 self.showPluginStatus("插件 \(name) 已卸载，服务已重启")
@@ -372,12 +858,28 @@ public final class SettingsViewModel: ObservableObject {
         if networkExposure != persistedExposure {
             networkExposure = persistedExposure
         }
+        if runtimeChannel == .next, autoFollowLatest {
+            autoFollowLatest = false
+        }
+        let normalizedRegistry = DshVersionManager.normalizedRegistry(npmRegistry)
+        let previousRegistry = DshVersionManager.normalizedRegistry(
+            DshStateManager.shared.current.npmRegistry
+        )
+        if normalizedRegistry != previousRegistry {
+            catalogRequestGeneration &+= 1
+            availableVersions = []
+            latestVersion = nil
+            nextVersion = nil
+        }
+        npmRegistry = normalizedRegistry
         DshStateManager.shared.update { state in
             state.dshPort = dshPort
-            state.npmRegistry = npmRegistry
+            state.npmRegistry = normalizedRegistry
             state.uiTheme = uiTheme
             state.translateCommands = translateCommands
             state.autoFollowLatest = autoFollowLatest
+            state.runtimeState.updatePolicy = autoFollowLatest ? .automaticStable : .notify
+            state.runtimeState.channel = runtimeChannel
             state.networkExposure = persistedExposure
         }
         MainWindowController.shared.syncUiTheme()
@@ -501,6 +1003,10 @@ public final class SettingsViewModel: ObservableObject {
 
     private func restartDshServiceAndWait() async throws {
         _ = try await MainWindowController.shared.restartDshService()
+    }
+
+    private func restartDshServiceDuringOperationAndWait() async throws {
+        _ = try await MainWindowController.shared.restartDshServiceDuringOperation()
     }
 
     private func clearPluginStatus() {

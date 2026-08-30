@@ -26,6 +26,18 @@ public struct DshPluginItem: Identifiable, Equatable {
     }
 }
 
+public struct DshProfileSnapshotProgress: Sendable {
+    public let phase: String
+    public let fraction: Double?
+    public let detail: String?
+
+    public init(phase: String, fraction: Double? = nil, detail: String? = nil) {
+        self.phase = phase
+        self.fraction = fraction
+        self.detail = detail
+    }
+}
+
 public final class DshPluginManager {
     public static let shared = DshPluginManager()
 
@@ -46,6 +58,8 @@ public final class DshPluginManager {
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app"
     ]
+    private static let webProfileSnapshotDirectoryName = "dsh-runtime-profile-snapshots"
+    private static let missingProfileMarkerName = ".profile-was-missing"
 
     public static var webProfileDirectory: URL {
         let dshHome = ProcessInfo.processInfo.environment["DSH_HOME"] ?? (NSHomeDirectory() as NSString).appendingPathComponent(".dsh")
@@ -53,6 +67,307 @@ public final class DshPluginManager {
     }
 
     private init() {}
+
+    private static var webProfileSnapshotDirectory: URL {
+        DshStateManager.appSupportDirectory
+            .appendingPathComponent(Self.webProfileSnapshotDirectoryName, isDirectory: true)
+    }
+
+    private static func webProfileSnapshotURL(for id: String) throws -> URL {
+        guard UUID(uuidString: id) != nil, !id.contains("/") else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -30,
+                userInfo: [NSLocalizedDescriptionKey: "web Profile 快照标识无效"]
+            )
+        }
+        return webProfileSnapshotDirectory.appendingPathComponent(id, isDirectory: true)
+    }
+
+    private static let snapshotSafetyBytes: Int64 = 256 * 1024 * 1024
+
+    private static func volumeIdentifier(for url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.volumeIdentifierKey]) else { return nil }
+        return values.volumeIdentifier.map { String(describing: $0) }
+    }
+
+    private static func allocatedSize(of directory: URL) -> UInt64 {
+        let keys: Set<URLResourceKey> = [
+            .isRegularFileKey,
+            .fileAllocatedSizeKey,
+            .totalFileAllocatedSizeKey,
+            .fileSizeKey
+        ]
+        guard let enumerator = FileManager.default.enumerator(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: []
+        ) else { return 0 }
+
+        var total: UInt64 = 0
+        for case let fileURL as URL in enumerator {
+            guard let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else { continue }
+            let size = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
+            if size > 0 {
+                total += UInt64(size)
+            }
+        }
+        return total
+    }
+
+    private static func ensureCapacity(for source: URL, at destinationParent: URL) throws {
+        let required = allocatedSize(of: source)
+        let availableValues = try destinationParent.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ])
+        let available: Int64
+        if let important = availableValues.volumeAvailableCapacityForImportantUsage {
+            available = important
+        } else {
+            available = Int64(availableValues.volumeAvailableCapacity ?? 0)
+        }
+        let requiredWithSafety = Int64(min(required, UInt64(Int64.max - snapshotSafetyBytes))) + snapshotSafetyBytes
+        guard available >= requiredWithSafety else {
+            let requiredGB = Double(requiredWithSafety) / 1_073_741_824.0
+            let availableGB = Double(max(available, 0)) / 1_073_741_824.0
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -35,
+                userInfo: [NSLocalizedDescriptionKey: String(
+                    format: "web Profile 所在磁盘空间不足，需要至少 %.2f GB，可用 %.2f GB",
+                    requiredGB,
+                    availableGB
+                )]
+            )
+        }
+    }
+
+    /// APFS clone is effectively metadata-only for a large Profile. If the
+    /// source is on another volume, or clone is unavailable, fall back to a
+    /// regular copy only after checking the destination volume capacity.
+    private static func copyDirectoryPreferClone(from source: URL, to destination: URL) throws {
+        let fileManager = FileManager.default
+        let destinationParent = destination.deletingLastPathComponent()
+        try fileManager.createDirectory(at: destinationParent, withIntermediateDirectories: true)
+
+        let sourceVolume = volumeIdentifier(for: source)
+        let destinationVolume = volumeIdentifier(for: destinationParent)
+        var attemptedClone = false
+        if sourceVolume != nil,
+           sourceVolume == destinationVolume {
+            attemptedClone = true
+            if cloneDirectoryIfPossible(from: source, to: destination) {
+                return
+            }
+        }
+
+        // cp -cR can leave a partial destination after an I/O or filesystem
+        // error. This destination is a transaction-local UUID path, so it is
+        // safe and necessary to remove it before the ordinary-copy fallback.
+        if attemptedClone, fileManager.fileExists(atPath: destination.path) {
+            do {
+                try fileManager.removeItem(at: destination)
+            } catch {
+                throw NSError(
+                    domain: "DshPluginManager",
+                    code: -36,
+                    userInfo: [NSLocalizedDescriptionKey: "APFS clone 失败且无法清理临时目标：\(error.localizedDescription)"]
+                )
+            }
+        }
+
+        try ensureCapacity(for: source, at: destinationParent)
+        try fileManager.copyItem(at: source, to: destination)
+    }
+
+    private static func cloneDirectoryIfPossible(from source: URL, to destination: URL) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/cp")
+        // `-c` asks APFS for a clone; there is no shell interpolation here.
+        process.arguments = ["-cR", source.path, destination.path]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    private static func createWebProfileSnapshotSynchronously(
+        onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void
+    ) throws -> String {
+        let id = UUID().uuidString
+        let snapshotURL = try webProfileSnapshotURL(for: id)
+        let profileURL = webProfileDirectory
+        let snapshotDirectory = webProfileSnapshotDirectory
+        let fileManager = FileManager.default
+
+        onProgress(DshProfileSnapshotProgress(
+            phase: "正在保护 web Profile...",
+            fraction: 0,
+            detail: "优先使用 APFS clone；跨卷时将检查可用空间"
+        ))
+        try fileManager.createDirectory(at: snapshotDirectory, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: snapshotURL, withIntermediateDirectories: true)
+
+        do {
+            if fileManager.fileExists(atPath: profileURL.path) {
+                try copyDirectoryPreferClone(
+                    from: profileURL,
+                    to: snapshotURL.appendingPathComponent("profile", isDirectory: true)
+                )
+            } else {
+                let marker = snapshotURL.appendingPathComponent(missingProfileMarkerName)
+                try Data().write(to: marker, options: .atomic)
+            }
+        } catch {
+            try? fileManager.removeItem(at: snapshotURL)
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -31,
+                userInfo: [NSLocalizedDescriptionKey: "无法创建 web Profile 更新快照：\(error.localizedDescription)"]
+            )
+        }
+        onProgress(DshProfileSnapshotProgress(
+            phase: "web Profile 快照已创建",
+            fraction: 1,
+            detail: "快照 \(id)"
+        ))
+        return id
+    }
+
+    private static func restoreWebProfileSnapshotSynchronously(
+        _ id: String,
+        onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void
+    ) throws {
+        let snapshotURL = try webProfileSnapshotURL(for: id)
+        let profileURL = webProfileDirectory
+        let savedProfileURL = snapshotURL.appendingPathComponent("profile", isDirectory: true)
+        let missingMarkerURL = snapshotURL.appendingPathComponent(missingProfileMarkerName)
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: snapshotURL.path) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -32,
+                userInfo: [NSLocalizedDescriptionKey: "找不到 web Profile 更新快照 \(id)"]
+            )
+        }
+
+        onProgress(DshProfileSnapshotProgress(
+            phase: "正在恢复 web Profile...",
+            fraction: 0,
+            detail: "正在停止对旧 Profile 的写入并还原快照"
+        ))
+
+        // Keep the displaced copy beside the live Profile. This is important
+        // when Application Support and DSH_HOME are on different volumes:
+        // moving the current Profile must remain same-volume and atomic.
+        let displacedURL = profileURL.deletingLastPathComponent()
+            .appendingPathComponent(".dsh-profile-restore-\(UUID().uuidString)", isDirectory: true)
+        var displacedCurrent = false
+
+        do {
+            if fileManager.fileExists(atPath: profileURL.path) {
+                try fileManager.moveItem(at: profileURL, to: displacedURL)
+                displacedCurrent = true
+            }
+
+            if !fileManager.fileExists(atPath: missingMarkerURL.path) {
+                guard fileManager.fileExists(atPath: savedProfileURL.path) else {
+                    throw NSError(
+                        domain: "DshPluginManager",
+                        code: -33,
+                        userInfo: [NSLocalizedDescriptionKey: "web Profile 快照内容不完整"]
+                    )
+                }
+                try fileManager.createDirectory(
+                    at: profileURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try copyDirectoryPreferClone(from: savedProfileURL, to: profileURL)
+            }
+
+            if displacedCurrent {
+                try? fileManager.removeItem(at: displacedURL)
+            }
+        } catch {
+            try? fileManager.removeItem(at: profileURL)
+            if displacedCurrent {
+                try? fileManager.moveItem(at: displacedURL, to: profileURL)
+            }
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -34,
+                userInfo: [NSLocalizedDescriptionKey: "无法恢复 web Profile 更新快照：\(error.localizedDescription)"]
+            )
+        }
+        onProgress(DshProfileSnapshotProgress(
+            phase: "web Profile 已恢复",
+            fraction: 1,
+            detail: nil
+        ))
+    }
+
+    /// Take a complete copy of the shared web Profile before a Runtime
+    /// transaction lets pnpm change package.json, the lockfile, or
+    /// node_modules. The snapshot is referenced by persisted transaction
+    /// state and is kept until the new Runtime has survived two starts.
+    public func createWebProfileSnapshot(
+        onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void = { _ in }
+    ) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            try Self.createWebProfileSnapshotSynchronously(onProgress: onProgress)
+        }.value
+    }
+
+    /// Restore a previously persisted Profile snapshot. Replacement is
+    /// recoverable: the current Profile is moved aside until the snapshot
+    /// copy succeeds, so a failed copy does not silently destroy both states.
+    public func restoreWebProfileSnapshot(
+        _ id: String,
+        onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void = { _ in }
+    ) async throws {
+        try await Task.detached(priority: .utility) {
+            try Self.restoreWebProfileSnapshotSynchronously(id, onProgress: onProgress)
+        }.value
+    }
+
+    /// Remove one exact, no-longer-needed Profile snapshot.
+    public func deleteWebProfileSnapshot(_ id: String) async throws {
+        try await Task.detached(priority: .utility) {
+            let snapshotURL = try Self.webProfileSnapshotURL(for: id)
+            guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return }
+            try FileManager.default.removeItem(at: snapshotURL)
+        }.value
+    }
+
+    /// Remove snapshots that are no longer referenced by persisted Runtime
+    /// state. Snapshot directories are UUID-named, so unrelated Profile data
+    /// cannot be selected by this cleanup.
+    @discardableResult
+    public func cleanupOrphanedWebProfileSnapshots(keeping retainedID: String?) async -> [String] {
+        await Task.detached(priority: .utility) {
+            guard let entries = try? FileManager.default.contentsOfDirectory(
+                at: Self.webProfileSnapshotDirectory,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) else { return [] }
+
+            var removed: [String] = []
+            for entry in entries {
+                let id = entry.lastPathComponent
+                guard UUID(uuidString: id) != nil, id != retainedID else { continue }
+                do {
+                    try FileManager.default.removeItem(at: entry)
+                    removed.append(id)
+                } catch {
+                    print("[DshPluginManager] Failed to remove orphaned Profile snapshot \(id):", error)
+                }
+            }
+            return removed
+        }.value
+    }
 
     /// List all installed plugins in the web profile.
     public func listPlugins(outdatedMap: [String: String] = [:]) -> [DshPluginItem] {
@@ -160,7 +475,7 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["outdated", "--json"]
+        proc.arguments = ["outdated", "--json"] + registryArguments()
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -208,7 +523,7 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["add", spec, "--reporter=append-only"]
+        proc.arguments = ["add", spec] + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -243,7 +558,7 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["update", name, "--latest", "--reporter=append-only"]
+        proc.arguments = ["update", name, "--latest"] + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -277,7 +592,7 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["update", "--latest", "--reporter=append-only"]
+        proc.arguments = ["update", "--latest"] + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -309,7 +624,7 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["remove", name, "--reporter=append-only"]
+        proc.arguments = ["remove", name] + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -388,7 +703,7 @@ public final class DshPluginManager {
             return
         }
 
-        let registry = DshStateManager.shared.current.npmRegistry ?? DshVersionManager.defaultRegistry
+        let registry = DshVersionManager.normalizedRegistry(DshStateManager.shared.current.npmRegistry)
         let base = registry.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: "\(base)/\(encodedName)") else { return }
 
@@ -640,7 +955,7 @@ public final class DshPluginManager {
     /// Ensure the built-in desktop host bridge plugin is installed and valid
     /// in the web profile. Failure is thrown so callers cannot start a bare
     /// WebServer as a fallback.
-    public func ensureDesktopHostPlugin() async throws -> Bool {
+    public func ensureDesktopHostPlugin(registry: String? = nil) async throws -> Bool {
         guard let hostBundle = NodeRuntime.shared.resolveDesktopHostBundlePath() else {
             throw NSError(domain: "DshPluginManager", code: -12, userInfo: [NSLocalizedDescriptionKey: "找不到内置 dsh-desktop-host Bundle"])
         }
@@ -690,6 +1005,7 @@ public final class DshPluginManager {
             + [
                 "file:\(hostBundle)",
                 "@deepseek-ai/dsh-host-webserver@\(dshVersion)",
+                "--registry", DshVersionManager.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry),
                 "--reporter=append-only"
             ]
 
@@ -795,5 +1111,9 @@ public final class DshPluginManager {
             return false
         }
         return bundles.contains(name)
+    }
+
+    private func registryArguments() -> [String] {
+        ["--registry", DshVersionManager.normalizedRegistry(DshStateManager.shared.current.npmRegistry)]
     }
 }
