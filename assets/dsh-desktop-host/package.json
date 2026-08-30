@@ -9,7 +9,16 @@
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
+    "./webserver": "./webserver.js",
+    "./browser-url-route": "./browser-url-route.js",
+    "./lan-url-route": "./lan-url-route.js",
+    "./lan-http-ingress": "./lan-http-ingress.js",
+    "./control": "./control.js",
+    "./access-state": "./access-state.js",
     "./package.json": "./package.json"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-host-webserver": "*"
   },
   "dsh": {
     "bundle": {

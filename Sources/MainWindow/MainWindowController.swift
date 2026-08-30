@@ -106,6 +106,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var webView: WKWebView?
     private var vibrancyView: NSVisualEffectView?
     private var webShell: DshWebShell?
+    private var rendererCookieStore: DshRendererCookieStore?
+    private var serviceSession: DshServiceSession?
     private var onboardingHostingView: NSView?
     private var webUIReadinessGeneration = 0
     private var windowDragMouseDownEvent: NSEvent?
@@ -175,6 +177,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         shell.webView.uiDelegate = self
         self.webShell = shell
         self.webView = shell.webView
+        self.rendererCookieStore = DshRendererCookieStore(dataStore: shell.webView.configuration.websiteDataStore)
         self.vibrancyView = shell.rootView
         win.contentView = shell.rootView
     }
@@ -196,8 +199,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         hideOnboardingView()
         Task { @MainActor in
             do {
-                let url = try await restartDshService()
-                print("[MainWindowController] DSH service ready at \(url)")
+                let session = try await restartDshService()
+                print("[MainWindowController] DSH service ready at \(session.url)")
             } catch {
                 print("[MainWindowController] Service start failed:", error)
                 self.revealWindow()
@@ -209,39 +212,164 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     /// Restart the service and wait until the selected runtime is ready. The
     /// settings version switch uses this throwing form so it can restore the
     /// previous selection if the new runtime fails to boot.
-    public func restartDshService() async throws -> URL {
-        // DSH must initialize the web profile before pnpm touches it. On a
-        // fresh install, running `pnpm add` first creates a package.json with
-        // no dsh.profile.bundles and leaves DSH waiting forever on an empty
-        // profile. Repair that malformed state from older Swift builds, then
-        // boot once so the runtime can create its canonical profile manifest.
-        DshPluginManager.shared.repairWebProfileManifestIfNeeded()
-        // An initialized profile may still contain a stale local bridge path
-        // (for example, after an old development build was removed). Repair
-        // it before DSH reads the bundle roster; otherwise dsh-app-boot exits
-        // before the post-start installation path can run.
-        let hostPreparedBeforeStart: Bool
-        if DshPluginManager.shared.hasInitializedWebProfileManifest() {
-            hostPreparedBeforeStart = await DshPluginManager.shared.ensureDesktopHostPlugin()
-        } else {
-            // On a truly new profile, let DSH create its canonical manifest
-            // first. Installing pnpm dependencies before that point would
-            // recreate the partial-manifest first-launch bug.
-            hostPreparedBeforeStart = false
-        }
-        var url = try await DshService.shared.start()
+    public func restartDshService() async throws -> DshServiceSession {
+        // The profile must be complete and the access-control bundle must be
+        // mounted before Node starts. This removes the old first-launch window
+        // where DSH briefly listened through the unprotected upstream server.
+        try DshPluginManager.shared.bootstrapWebProfileManifestIfMissing()
+        _ = try await DshPluginManager.shared.ensureDesktopHostPlugin()
+        serviceSession = nil
+        let session = try await DshService.shared.start()
 
-        // Installing the bridge changes the profile composition, so restart
-        // once to mount it. Subsequent launches take the single-start path.
-        if !hostPreparedBeforeStart {
-            let hostInstalledAfterStart = await DshPluginManager.shared.ensureDesktopHostPlugin()
-            if hostInstalledAfterStart {
-                url = try await DshService.shared.start()
+        do {
+            guard let rendererCookieStore else {
+                throw DshRendererCookieStore.CookieError.writeFailed
+            }
+            try await rendererCookieStore.install(for: session)
+        } catch {
+            // A service without its current Renderer credential must never be
+            // left reachable after startup, even if Cookie installation fails.
+            DshService.shared.stop()
+            throw error
+        }
+
+        serviceSession = session
+        webUIReadinessGeneration &+= 1
+        self.webView?.load(URLRequest(url: session.url))
+        return session
+    }
+
+    public enum BrowserURLError: Error, LocalizedError {
+        case serviceUnavailable
+        case accessDisabled
+        case requestFailed(Int)
+        case invalidResponse
+        case openFailed
+
+        public var errorDescription: String? {
+            switch self {
+            case .serviceUnavailable:
+                return "DSH 服务尚未就绪，暂时无法生成浏览器访问地址。"
+            case .accessDisabled:
+                return "请先开启浏览器访问。"
+            case .requestFailed(let status):
+                return "生成浏览器访问地址失败（HTTP \(status)）。"
+            case .invalidResponse:
+                return "DSH 返回的浏览器访问地址无效。"
+            case .openFailed:
+                return "无法打开默认浏览器。"
             }
         }
-        webUIReadinessGeneration &+= 1
-        self.webView?.load(URLRequest(url: url))
-        return url
+    }
+
+    /// Ask the Host-side bridge for a short-lived authenticated URL. The
+    /// Renderer cookie is attached only to this in-memory request and the URL
+    /// is never persisted or printed by the native app.
+    public func fetchAuthenticatedBrowserURL() async throws -> URL {
+        guard DshStateManager.shared.current.browserAccessEnabled else {
+            throw BrowserURLError.accessDisabled
+        }
+        guard let session = serviceSession else {
+            throw BrowserURLError.serviceUnavailable
+        }
+
+        var request = URLRequest(url: session.url.appendingPathComponent("__dsh_swift/browser-url"))
+        request.httpMethod = "POST"
+        request.setValue("dsh_swift_renderer=\(session.access.rendererToken)", forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let (data, response) = try await urlSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw BrowserURLError.invalidResponse
+        }
+        guard httpResponse.statusCode == 200 else {
+            throw BrowserURLError.requestFailed(httpResponse.statusCode)
+        }
+
+        struct BrowserURLResponse: Decodable {
+            let url: URL
+        }
+        guard let payload = try? JSONDecoder().decode(BrowserURLResponse.self, from: data),
+              payload.url.scheme == "http",
+              payload.url.host == "127.0.0.1",
+              payload.url.port == session.url.port else {
+            throw BrowserURLError.invalidResponse
+        }
+        return payload.url
+    }
+
+    public enum LANURLError: Error, LocalizedError {
+        case serviceUnavailable
+        case accessDisabled
+        case networkAccessDisabled
+        case requestFailed(Int)
+        case invalidResponse
+
+        public var errorDescription: String? {
+            switch self {
+            case .serviceUnavailable:
+                return "DSH 服务尚未就绪，暂时无法生成局域网访问地址。"
+            case .accessDisabled:
+                return "请先开启浏览器访问。"
+            case .networkAccessDisabled:
+                return "请先开启局域网访问。"
+            case .requestFailed(let status):
+                return "生成局域网访问地址失败（HTTP \(status)）。"
+            case .invalidResponse:
+                return "DSH 返回的局域网访问地址无效。"
+            }
+        }
+    }
+
+    /// Ask the Host for a short-lived LAN URL. The URL remains in memory on
+    /// the native side; the first HTTP navigation exchanges its query token
+    /// for a session cookie at the LAN ingress.
+    public func fetchLANURL() async throws -> URL {
+        let state = DshStateManager.shared.current
+        guard state.browserAccessEnabled else { throw LANURLError.accessDisabled }
+        guard state.networkExposure == .lan else { throw LANURLError.networkAccessDisabled }
+        guard let session = serviceSession else { throw LANURLError.serviceUnavailable }
+
+        var request = URLRequest(url: session.url.appendingPathComponent("__dsh_swift/lan-url"))
+        request.httpMethod = "POST"
+        request.setValue("dsh_swift_renderer=\(session.access.rendererToken)", forHTTPHeaderField: "Cookie")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        let urlSession = URLSession(configuration: configuration)
+        defer { urlSession.invalidateAndCancel() }
+
+        let (data, response) = try await urlSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw LANURLError.invalidResponse
+        }
+        guard httpResponse.statusCode == 200 else {
+            throw LANURLError.requestFailed(httpResponse.statusCode)
+        }
+
+        struct LANURLResponse: Decodable {
+            let url: URL
+        }
+        guard let payload = try? JSONDecoder().decode(LANURLResponse.self, from: data),
+              payload.url.scheme == "http",
+              let host = payload.url.host,
+              !host.isEmpty,
+              host != "127.0.0.1",
+              host != "localhost",
+              payload.url.port != nil else {
+            throw LANURLError.invalidResponse
+        }
+        return payload.url
     }
 
     /// Reveal the native window only after DSH has replaced its plugin boot

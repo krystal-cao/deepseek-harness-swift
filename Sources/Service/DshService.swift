@@ -8,14 +8,19 @@ public final class DshService: @unchecked Sendable {
     private struct ManagedDshProcess {
         let process: Process
         let hasProcessGroup: Bool
+        let controlWriteHandle: FileHandle
+        let generationID: UUID
+        let processIO: DshProcessIO
+        let access: DshAccessController
     }
 
     private struct DshProcessRecord: Codable {
         let pid: Int32
         let port: Int
         let nodePath: String
-        let entryPath: String
         let processGroupID: Int32?
+        let generationID: String?
+        let processStartTime: Double?
     }
 
     private var process: ManagedDshProcess?
@@ -27,6 +32,8 @@ public final class DshService: @unchecked Sendable {
     public enum ServiceError: Error, LocalizedError {
         case dshEntryNotFound
         case nodeNotFound
+        case runtimeBootstrapNotFound
+        case serviceNotRunning
         case portInUse(Int)
         case startupFailed(String)
 
@@ -36,6 +43,10 @@ public final class DshService: @unchecked Sendable {
                 return "找不到 DSH 运行时入口。请确认已安装或在设置中下载版本。"
             case .nodeNotFound:
                 return "找不到 Node.js 运行时可执行文件。"
+            case .runtimeBootstrapNotFound:
+                return "找不到 DSH 运行时启动器。请重新安装应用。"
+            case .serviceNotRunning:
+                return "DSH 服务尚未就绪，无法更新浏览器访问策略。"
             case .portInUse(let port):
                 return "端口 \(port) 已被占用。请关闭占用该端口的程序或在设置中修改端口。"
             case .startupFailed(let detail):
@@ -43,10 +54,6 @@ public final class DshService: @unchecked Sendable {
             }
         }
     }
-
-    private static let readyRegex = try! NSRegularExpression(
-        pattern: #"dsh web: (http://127\.0\.0\.1:\d+)\b"#
-    )
 
     private init() {}
 
@@ -73,8 +80,8 @@ public final class DshService: @unchecked Sendable {
         return bindResult == 0
     }
 
-    /// Start or restart the DSH service and return the ready URL.
-    public func start(port: Int? = nil) async throws -> URL {
+    /// Start or restart the DSH service and return the protected session.
+    public func start(port: Int? = nil) async throws -> DshServiceSession {
         let actualPort = port ?? (DshStateManager.shared.current.dshPort ?? 3080)
 
         // A settings change, version switch, or plugin mutation is a restart.
@@ -103,15 +110,20 @@ public final class DshService: @unchecked Sendable {
         guard let nodePath = NodeRuntime.shared.resolveNodeBinary() else {
             throw ServiceError.nodeNotFound
         }
+        guard let runtimeBootstrap = NodeRuntime.shared.resolveRuntimeBootstrap() else {
+            throw ServiceError.runtimeBootstrapNotFound
+        }
+
+        let state = DshStateManager.shared.current
+        let access = try DshAccessController(
+            ordinaryBrowserEnabled: state.browserAccessEnabled,
+            networkExposure: state.networkExposure
+        )
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: nodePath)
-        proc.arguments = Self.buildArguments(
-            entry: entry,
-            port: actualPort,
-            version: Self.resolveDshVersion(forEntry: entry)
-        )
-        proc.standardInput = FileHandle.nullDevice
+        proc.arguments = Self.buildArguments(runtimeBootstrap: runtimeBootstrap)
+        proc.standardInput = access.controlReadHandle
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -119,11 +131,25 @@ public final class DshService: @unchecked Sendable {
         proc.standardError = stderrPipe
 
         let environment = NodeRuntime.shared.buildEnvironment()
-        proc.environment = environment
+        var managedEnvironment = environment
+        managedEnvironment["DSH_DESKTOP_LAUNCH"] = "1"
+        managedEnvironment["DSH_DESKTOP_PORT"] = String(actualPort)
+        proc.environment = managedEnvironment
+
+        let processIO = DshProcessIO(
+            proc: proc,
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            expectedGeneration: access.generation.id,
+            secrets: [access.generation.rendererToken]
+        )
+        processIO.start()
 
         do {
             try proc.run()
         } catch {
+            processIO.fail(error)
+            access.closeWriteHandle()
             throw ServiceError.startupFailed(error.localizedDescription)
         }
         // Put the child into its own process group so a single kill(-pgid) can
@@ -131,59 +157,85 @@ public final class DshService: @unchecked Sendable {
         // pid leaves the actual web worker alive and holding the port.
         let hasProcessGroup = makeProcessGroupLeader(proc)
         let processGroupID = hasProcessGroup ? proc.processIdentifier : nil
-        setProcess(ManagedDshProcess(process: proc, hasProcessGroup: hasProcessGroup))
+        setProcess(ManagedDshProcess(
+            process: proc,
+            hasProcessGroup: hasProcessGroup,
+            controlWriteHandle: access.controlWriteHandle,
+            generationID: access.generation.id,
+            processIO: processIO,
+            access: access
+        ))
         saveProcessRecord(DshProcessRecord(
             pid: proc.processIdentifier,
             port: actualPort,
-            nodePath: nodePath,
-            entryPath: entry,
-            processGroupID: processGroupID
+            nodePath: canonicalPath(nodePath),
+            processGroupID: processGroupID,
+            generationID: access.generation.id.uuidString,
+            processStartTime: processStartTime(proc.processIdentifier)
         ))
 
-        let waiter = ProcessWaiter(
-            proc: proc,
-            stdoutPipe: stdoutPipe,
-            stderrPipe: stderrPipe,
-            hasProcessGroup: hasProcessGroup
+        do {
+            try access.sendBootstrap(entryPath: entry, port: actualPort)
+            let url = try await processIO.waitForReady()
+            return DshServiceSession(url: url, access: access.generation)
+        } catch {
+            await stopAndWait()
+            if let serviceError = error as? ServiceError { throw serviceError }
+            throw ServiceError.startupFailed(error.localizedDescription)
+        }
+    }
+
+    /// Apply a browser-access change to the running generation and wait for
+    /// the matching Node acknowledgement before reporting success.
+    public func setBrowserAccessEnabled(_ enabled: Bool) async throws {
+        guard let managed = currentProcess() else {
+            throw ServiceError.serviceNotRunning
+        }
+        let exposure = enabled ? managed.access.currentPolicy.networkExposure : .loopback
+        let revision = try managed.access.sendPolicy(
+            ordinaryBrowserEnabled: enabled,
+            networkExposure: exposure
         )
-        return try await waiter.wait()
+        try await managed.processIO.waitForPolicyApplied(
+            generation: managed.generationID,
+            revision: revision,
+            ordinaryBrowserEnabled: enabled,
+            networkExposure: exposure
+        )
     }
 
-    public static func buildArguments(entry: String, port: Int, version: String?) -> [String] {
-        var arguments = [
-            "--expose-internals",
-            entry,
-            "--profile", "web",
-            "--host", "127.0.0.1",
-            "--port", String(port)
-        ]
-        if let version,
-           let semanticVersion = DshSemanticVersion(version),
-           semanticVersion.supportsNoOpen {
-            arguments.append("--no-open")
+    /// Enable or disable the separate LAN ingress. The DSH WebServer itself
+    /// remains loopback-only; the Node Host owns the temporary forwarding
+    /// listener and reports its readiness through the policy acknowledgement.
+    public func setNetworkExposure(_ exposure: DshNetworkExposure) async throws {
+        guard let managed = currentProcess() else {
+            throw ServiceError.serviceNotRunning
         }
-        return arguments
+        let browserEnabled = managed.access.currentPolicy.ordinaryBrowserEnabled
+        guard exposure == .loopback || browserEnabled else {
+            throw DshControlProtocolError.invalidPolicy
+        }
+        let revision = try managed.access.sendPolicy(
+            ordinaryBrowserEnabled: browserEnabled,
+            networkExposure: exposure
+        )
+        try await managed.processIO.waitForPolicyApplied(
+            generation: managed.generationID,
+            revision: revision,
+            ordinaryBrowserEnabled: browserEnabled,
+            networkExposure: exposure
+        )
     }
 
-    private static func resolveDshVersion(forEntry entry: String) -> String? {
-        var directory = URL(fileURLWithPath: entry).deletingLastPathComponent()
-        for _ in 0..<5 {
-            let manifestURL = directory.appendingPathComponent("package.json")
-            if let data = try? Data(contentsOf: manifestURL),
-               let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               manifest["name"] as? String == "@deepseek-ai/dsh",
-               let version = manifest["version"] as? String {
-                return version
-            }
-            directory.deleteLastPathComponent()
-        }
-        return nil
+    public static func buildArguments(runtimeBootstrap: String) -> [String] {
+        ["--expose-internals", runtimeBootstrap]
     }
 
     public func stop() {
         let managed = takeProcess()
-        guard let managed,
-              managed.process.isRunning || managed.hasProcessGroup else { return }
+        guard let managed else { return }
+        managed.controlWriteHandle.closeFile()
+        guard managed.process.isRunning || managed.hasProcessGroup else { return }
         managed.process.terminationHandler = nil
         signalManagedProcess(managed, SIGTERM)
         // This runs from applicationWillTerminate. The old code scheduled SIGKILL
@@ -201,8 +253,9 @@ public final class DshService: @unchecked Sendable {
     private func stopAndWait() async {
         let managed = takeProcess()
 
-        guard let managed,
-              managed.process.isRunning || managed.hasProcessGroup else { return }
+        guard let managed else { return }
+        managed.controlWriteHandle.closeFile()
+        guard managed.process.isRunning || managed.hasProcessGroup else { return }
         managed.process.terminationHandler = nil
         signalManagedProcess(managed, SIGTERM)
 
@@ -268,42 +321,60 @@ public final class DshService: @unchecked Sendable {
         // Never fall back to a direct kill after the group leader has gone
         // away. If the group no longer exists, its members are gone too; a
         // direct kill at this point could hit a recycled PID.
-        if let groupID = record.processGroupID {
+        if let groupID = record.processGroupID,
+           listeningPids(on: record.port).contains(where: { isRecordedDshServer(pid: $0, record: record) }) {
             _ = kill(-pid_t(groupID), SIGKILL)
         } else if isRecordedDshServer(pid: pid, record: record) {
             _ = kill(pid, SIGKILL)
         }
     }
 
-    /// Verify that a recorded PID still carries this app's DSH command line.
+    /// Verify the recorded process using kernel identity, not its command line.
     /// A PID alone is not ownership: it can be reused after a process exits.
     private func isRecordedDshServer(pid: pid_t, record: DshProcessRecord) -> Bool {
-        guard let command = processCommandLine(pid) else { return false }
+        guard processExecutablePath(pid) == canonicalPath(record.nodePath) else { return false }
         if pid == pid_t(record.pid) {
-            return command.contains(record.nodePath)
-                && command.contains(record.entryPath)
-                && command.contains("--profile web")
-                && command.contains("--host 127.0.0.1")
-                && command.contains("--port \(record.port)")
+            guard let expectedStart = record.processStartTime,
+                  let actualStart = processStartTime(pid) else { return false }
+            return abs(expectedStart - actualStart) < 0.01
         }
 
         guard let groupID = record.processGroupID else { return false }
+        // A surviving group member is only reclaimable while the recorded
+        // leader still proves its own PID/start-time identity. This prevents
+        // a recycled PGID from becoming an ownership claim by itself.
         return getpgid(pid) == pid_t(groupID)
+            && isRecordedLeader(record)
     }
 
-    private func processCommandLine(_ pid: pid_t) -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-ww", "-p", String(pid), "-o", "command="]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
-        guard (try? proc.run()) != nil else { return nil }
-        proc.waitUntilExit()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        let text = String(data: data, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return text.isEmpty ? nil : text
+    private func isRecordedLeader(_ record: DshProcessRecord) -> Bool {
+        isRecordedDshServer(pid: pid_t(record.pid), record: record)
+    }
+
+    private func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().path
+    }
+
+    private func processExecutablePath(_ pid: pid_t) -> String? {
+        // PROC_PIDPATHINFO_MAXSIZE is a C macro that is not imported by the
+        // Swift Darwin overlay; 16 KiB safely covers macOS executable paths.
+        var buffer = [CChar](repeating: 0, count: 16 * 1024)
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return canonicalPath(String(cString: buffer))
+    }
+
+    private func processStartTime(_ pid: pid_t) -> Double? {
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            Int32(MemoryLayout<proc_bsdinfo>.size)
+        )
+        guard size == Int32(MemoryLayout<proc_bsdinfo>.size) else { return nil }
+        return Double(info.pbi_start_tvsec) + Double(info.pbi_start_tvusec) / 1_000_000
     }
 
     private func listeningPids(on port: Int) -> [pid_t] {
@@ -349,101 +420,10 @@ public final class DshService: @unchecked Sendable {
         process = managed
         lock.unlock()
     }
-}
 
-private final class ProcessWaiter: @unchecked Sendable {
-    private let proc: Process
-    private let stdoutPipe: Pipe
-    private let stderrPipe: Pipe
-    private let hasProcessGroup: Bool
-    private let lock = NSLock()
-    private var output = ""
-    private var settled = false
-    private var continuation: CheckedContinuation<URL, Error>?
-    private var timeoutTask: DispatchWorkItem?
-
-    private static let readyRegex = try! NSRegularExpression(
-        pattern: #"dsh web: (http://127\.0\.0\.1:\d+)\b"#
-    )
-
-    init(proc: Process, stdoutPipe: Pipe, stderrPipe: Pipe, hasProcessGroup: Bool) {
-        self.proc = proc
-        self.stdoutPipe = stdoutPipe
-        self.stderrPipe = stderrPipe
-        self.hasProcessGroup = hasProcessGroup
-    }
-
-    func wait() async throws -> URL {
-        return try await withCheckedThrowingContinuation { cont in
-            self.continuation = cont
-
-            let timeoutTask = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
-                let pid = self.proc.processIdentifier
-                if self.hasProcessGroup {
-                    _ = kill(-pid, SIGTERM)
-                    _ = kill(-pid, SIGKILL)
-                } else if self.proc.isRunning {
-                    _ = kill(pid, SIGTERM)
-                    _ = kill(pid, SIGKILL)
-                }
-                self.lock.lock()
-                let currentOutput = self.output.isEmpty ? "等待 60 秒后超时。" : self.output
-                self.lock.unlock()
-                self.finish(.failure(DshService.ServiceError.startupFailed(currentOutput)))
-            }
-            self.timeoutTask = timeoutTask
-
-            self.stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                self?.inspect(handle.availableData)
-            }
-            self.stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                self?.inspect(handle.availableData)
-            }
-
-            DispatchQueue.global().asyncAfter(deadline: .now() + 60, execute: timeoutTask)
-
-            self.proc.terminationHandler = { [weak self] terminatedProcess in
-                guard let self = self else { return }
-                self.lock.lock()
-                let detail = """
-                退出码 \(terminatedProcess.terminationStatus)，信号 \(terminatedProcess.terminationReason.rawValue)
-                \(self.output)
-                """
-                self.lock.unlock()
-                self.finish(.failure(DshService.ServiceError.startupFailed(detail)))
-            }
-        }
-    }
-
-    private func inspect(_ data: Data) {
-        guard !data.isEmpty,
-              let chunk = String(data: data, encoding: .utf8) else { return }
-        lock.lock()
-        output += chunk
-        let range = NSRange(output.startIndex..., in: output)
-        let match = Self.readyRegex.firstMatch(in: output, range: range)
-        var matchedUrl: URL?
-        if let match = match, let urlRange = Range(match.range(at: 1), in: output) {
-            matchedUrl = URL(string: String(output[urlRange]))
-        }
-        lock.unlock()
-
-        if let url = matchedUrl {
-            finish(.success(url))
-        }
-    }
-
-    private func finish(_ result: Result<URL, Error>) {
+    private func currentProcess() -> ManagedDshProcess? {
         lock.lock()
         defer { lock.unlock() }
-        guard !settled else { return }
-        settled = true
-        timeoutTask?.cancel()
-        timeoutTask = nil
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-        continuation?.resume(with: result)
-        continuation = nil
+        return process
     }
 }

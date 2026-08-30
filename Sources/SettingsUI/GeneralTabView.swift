@@ -154,7 +154,7 @@ public struct GeneralTabView: View {
 
             SettingsSection(
                 "服务",
-                footer: "端口范围为 1024–65535；保存后会自动重启 DSH 服务。"
+                footer: "端口范围为 1024–65535；保存端口后会自动重启 DSH 服务。关闭浏览器访问时，只有 DSH 桌面窗口可以访问本地服务。当前局域网入口使用 HTTP，仅适合受信任的家庭或开发网络；HTTPS/WSS 将单独实现。"
             ) {
                 SettingsRow(
                     title: "DSH 启动端口",
@@ -191,6 +191,78 @@ public struct GeneralTabView: View {
                         .foregroundStyle(.secondary)
                         .disabled(localState.tempPort == "3080")
                     }
+                }
+
+                SettingsDivider()
+
+                SettingsRow(
+                    title: "允许在浏览器中打开",
+                    description: "开启后仍需通过 DSH 生成的短期认证地址访问本地服务。"
+                ) {
+                    HStack(spacing: 10) {
+                        if viewModel.browserAccessEnabled {
+                            Button {
+                                viewModel.openBrowser()
+                            } label: {
+                                if viewModel.isOpeningBrowser {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Text("在浏览器中打开")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(viewModel.isUpdatingBrowserAccess || viewModel.isOpeningBrowser)
+                        }
+
+                        Toggle("", isOn: Binding(
+                            get: { viewModel.browserAccessEnabled },
+                            set: { viewModel.setBrowserAccessEnabled($0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(viewModel.isUpdatingBrowserAccess)
+                    }
+                    .frame(width: 220, alignment: .trailing)
+                }
+
+                SettingsDivider()
+
+                SettingsRow(
+                    title: "允许局域网访问",
+                    description: "开启后在同一局域网的设备可通过短期地址访问 DSH。"
+                ) {
+                    HStack(spacing: 10) {
+                        if viewModel.networkExposure == .lan {
+                            Button {
+                                viewModel.copyLANURL()
+                            } label: {
+                                if viewModel.isLoadingLANURL {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Text("复制访问地址")
+                                }
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(viewModel.isUpdatingNetworkExposure || viewModel.isLoadingLANURL)
+                        }
+
+                        Toggle("", isOn: Binding(
+                            get: { viewModel.networkExposure == .lan },
+                            set: { viewModel.setNetworkExposure($0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .disabled(!viewModel.browserAccessEnabled || viewModel.isUpdatingBrowserAccess || viewModel.isUpdatingNetworkExposure)
+                    }
+                    .frame(width: 220, alignment: .trailing)
                 }
             }
         }

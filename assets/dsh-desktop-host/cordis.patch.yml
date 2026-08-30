@@ -1,8 +1,19 @@
-# Desktop host bridge: the row below is a web client plugin. The node half
-# scans Loader entries whose package declares dsh.client (platform web),
-# composes it into window.__DSH_BOOT__, and serves /plugins/dsh-desktop-host/client.js.
-# Its browser half reports plugin activation and theme/change events to the
-# Electron shell through the window.dshDesktop preload bridge.
+# Desktop access control must replace the upstream webserver row before any
+# route-owning plugin is activated. The replacement keeps the public service
+# name `webServer` while wrapping every registration boundary.
+- id: webserver
+  name: '@deepseek-ai/dsh-host-webserver'
+  disabled: true
+
+- insert:
+    - id: desktop-webserver
+      name: dsh-desktop-host/webserver
+      config:
+        host: 127.0.0.1
+        port: !!js Number(process.env.DSH_DESKTOP_PORT ?? 3080)
+
+# The row below is also the web client plugin. Its node half starts the
+# inherited control channel; its browser half is served through ./client.
 - insert:
     - id: desktop-host
       name: dsh-desktop-host

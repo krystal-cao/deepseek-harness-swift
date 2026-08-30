@@ -35,6 +35,11 @@
 		E00000000000000000000025 /* AppUpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000045 /* AppUpdateManager.swift */; };
 		E00000000000000000000026 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = D00000000000000000000047 /* Sparkle */; };
 		E00000000000000000000027 /* DshWebShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000050 /* DshWebShell.swift */; };
+		E00000000000000000000028 /* DshControlProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000051 /* DshControlProtocol.swift */; };
+		E00000000000000000000029 /* DshAccessController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000052 /* DshAccessController.swift */; };
+		E00000000000000000000030 /* DshProcessIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000053 /* DshProcessIO.swift */; };
+		E00000000000000000000031 /* DshRendererCookieStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000054 /* DshRendererCookieStore.swift */; };
+		E00000000000000000000032 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D00000000000000000000034 /* Security.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -65,9 +70,14 @@
 		D00000000000000000000031 /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		D00000000000000000000032 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		D00000000000000000000033 /* UserNotifications.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UserNotifications.framework; path = System/Library/Frameworks/UserNotifications.framework; sourceTree = SDKROOT; };
+		D00000000000000000000034 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		D00000000000000000000044 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Version.xcconfig; sourceTree = "<group>"; };
 		D00000000000000000000045 /* AppUpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateManager.swift; sourceTree = "<group>"; };
 		D00000000000000000000050 /* DshWebShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshWebShell.swift; sourceTree = "<group>"; };
+		D00000000000000000000051 /* DshControlProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshControlProtocol.swift; sourceTree = "<group>"; };
+		D00000000000000000000052 /* DshAccessController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshAccessController.swift; sourceTree = "<group>"; };
+		D00000000000000000000053 /* DshProcessIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshProcessIO.swift; sourceTree = "<group>"; };
+		D00000000000000000000054 /* DshRendererCookieStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshRendererCookieStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -78,6 +88,7 @@
 				E00000000000000000000022 /* WebKit.framework in Frameworks */,
 				E00000000000000000000023 /* SwiftUI.framework in Frameworks */,
 				E00000000000000000000024 /* UserNotifications.framework in Frameworks */,
+				E00000000000000000000032 /* Security.framework in Frameworks */,
 				E00000000000000000000026 /* Sparkle in Frameworks */,
 			);
 		};
@@ -131,6 +142,7 @@
 				D00000000000000000000031 /* WebKit.framework */,
 				D00000000000000000000032 /* SwiftUI.framework */,
 				D00000000000000000000033 /* UserNotifications.framework */,
+				D00000000000000000000034 /* Security.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -148,6 +160,9 @@
 			children = (
 				D00000000000000000000014 /* NodeRuntime.swift */,
 				D00000000000000000000016 /* DshService.swift */,
+				D00000000000000000000051 /* DshControlProtocol.swift */,
+				D00000000000000000000052 /* DshAccessController.swift */,
+				D00000000000000000000053 /* DshProcessIO.swift */,
 			);
 			path = Service;
 			sourceTree = "<group>";
@@ -198,6 +213,7 @@
 			children = (
 				D00000000000000000000022 /* MainWindowController.swift */,
 				D00000000000000000000050 /* DshWebShell.swift */,
+				D00000000000000000000054 /* DshRendererCookieStore.swift */,
 			);
 			path = MainWindow;
 			sourceTree = "<group>";
@@ -305,6 +321,7 @@
 				"RESOURCES_DIR=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"",
 				"mkdir -p \"${RESOURCES_DIR}/node/bin\" \"${RESOURCES_DIR}/assets/bin\"",
 				"cp \"${SWIFT_ASSETS_DIR}/dsh-family.json\" \"${RESOURCES_DIR}/assets/dsh-family.json\"",
+				"cp \"${SWIFT_ASSETS_DIR}/dsh-runtime-bootstrap.mjs\" \"${RESOURCES_DIR}/assets/dsh-runtime-bootstrap.mjs\"",
 				"cp \"${SWIFT_ASSETS_DIR}/bin/pnpm\" \"${RESOURCES_DIR}/assets/bin/pnpm\"",
 				"if [ -d \"${SWIFT_ASSETS_DIR}/node/bin\" ]; then",
 				"\tcp -R \"${SWIFT_ASSETS_DIR}/node/bin/.\" \"${RESOURCES_DIR}/node/bin/\"",
@@ -350,6 +367,10 @@
 				E00000000000000000000020 /* SettingsWindowController.swift in Sources */,
 				E00000000000000000000025 /* AppUpdateManager.swift in Sources */,
 				E00000000000000000000027 /* DshWebShell.swift in Sources */,
+				E00000000000000000000028 /* DshControlProtocol.swift in Sources */,
+				E00000000000000000000029 /* DshAccessController.swift in Sources */,
+				E00000000000000000000030 /* DshProcessIO.swift in Sources */,
+				E00000000000000000000031 /* DshRendererCookieStore.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

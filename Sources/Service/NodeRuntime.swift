@@ -101,6 +101,14 @@ public final class NodeRuntime {
         return FileManager.default.fileExists(atPath: hostDir) ? hostDir : nil
     }
 
+    /// Resolve the app-owned Node bootstrap that receives the private launch
+    /// descriptor before dynamically importing the selected DSH version.
+    public func resolveRuntimeBootstrap() -> String? {
+        guard let assets = resolveAssetsDirectory() else { return nil }
+        let bootstrap = (assets as NSString).appendingPathComponent("dsh-runtime-bootstrap.mjs")
+        return FileManager.default.isReadableFile(atPath: bootstrap) ? bootstrap : nil
+    }
+
     /// Resolve the full PATH environment variable from the user's interactive login shell.
     public func resolveUserPath() -> String {
         lock.lock()

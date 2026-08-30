@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import SwiftUI
 import Combine
 
@@ -19,6 +20,13 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var autoFollowLatest: Bool = false
     @Published public var npmRegistry: String = DshVersionManager.defaultRegistry
     @Published public var dshPort: Int = 3080
+    @Published public var browserAccessEnabled: Bool = false
+    @Published public var networkExposure: DshNetworkExposure = .loopback
+    @Published public var isUpdatingBrowserAccess: Bool = false
+    @Published public var isUpdatingNetworkExposure: Bool = false
+    @Published public private(set) var lanURL: URL?
+    @Published public var isLoadingLANURL: Bool = false
+    @Published public var isOpeningBrowser: Bool = false
     @Published public var uiTheme: String = "default"
     @Published public private(set) var externalTheme: String?
     @Published public var translateCommands: Bool = true
@@ -66,6 +74,9 @@ public final class SettingsViewModel: ObservableObject {
         self.autoFollowLatest = state.autoFollowLatest
         self.npmRegistry = state.npmRegistry ?? DshVersionManager.defaultRegistry
         self.dshPort = state.dshPort ?? 3080
+        self.browserAccessEnabled = state.browserAccessEnabled
+        self.networkExposure = state.networkExposure
+        if state.networkExposure != .lan { self.lanURL = nil }
         self.uiTheme = state.uiTheme
         self.externalTheme = DshPluginManager.shared.detectExternalTheme()
         self.translateCommands = state.translateCommands
@@ -357,15 +368,129 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func saveGeneralSettings() {
+        let persistedExposure = browserAccessEnabled ? networkExposure : .loopback
+        if networkExposure != persistedExposure {
+            networkExposure = persistedExposure
+        }
         DshStateManager.shared.update { state in
             state.dshPort = dshPort
             state.npmRegistry = npmRegistry
             state.uiTheme = uiTheme
             state.translateCommands = translateCommands
             state.autoFollowLatest = autoFollowLatest
+            state.networkExposure = persistedExposure
         }
         MainWindowController.shared.syncUiTheme()
         MainWindowController.shared.syncTranslateCommands()
+    }
+
+    /// Change the live Node policy and persist the setting in the order
+    /// required by the browser-access contract. A failed policy update rolls
+    /// both the UI and disk state back to the previous value.
+    public func setBrowserAccessEnabled(_ enabled: Bool) {
+        guard !isUpdatingBrowserAccess, enabled != browserAccessEnabled else { return }
+
+        let previous = browserAccessEnabled
+        browserAccessEnabled = enabled
+        isUpdatingBrowserAccess = true
+        Task { [self] in
+            do {
+                if enabled {
+                    DshStateManager.shared.update { $0.browserAccessEnabled = true }
+                    try await DshService.shared.setBrowserAccessEnabled(true)
+                } else {
+                    try await DshService.shared.setBrowserAccessEnabled(false)
+                    DshStateManager.shared.update {
+                        $0.browserAccessEnabled = false
+                        $0.networkExposure = .loopback
+                    }
+                    self.networkExposure = .loopback
+                    self.lanURL = nil
+                }
+            } catch {
+                DshStateManager.shared.update { $0.browserAccessEnabled = previous }
+                self.browserAccessEnabled = previous
+                self.alertMessage = "更新浏览器访问设置失败：\(error.localizedDescription)"
+            }
+            self.isUpdatingBrowserAccess = false
+        }
+    }
+
+    /// Toggle the separate LAN HTTP ingress. It is available only while the
+    /// ordinary browser gate is enabled; the live policy is acknowledged
+    /// before the state file is changed.
+    public func setNetworkExposure(_ enabled: Bool) {
+        let target: DshNetworkExposure = enabled ? .lan : .loopback
+        guard !isUpdatingNetworkExposure,
+              target != networkExposure else { return }
+        guard browserAccessEnabled else {
+            alertMessage = "请先开启浏览器访问。"
+            return
+        }
+
+        let previous = networkExposure
+        networkExposure = target
+        isUpdatingNetworkExposure = true
+        Task { [self] in
+            do {
+                try await DshService.shared.setNetworkExposure(target)
+                DshStateManager.shared.update { $0.networkExposure = target }
+                if target == .loopback { self.lanURL = nil }
+            } catch {
+                self.networkExposure = previous
+                self.alertMessage = "更新局域网访问设置失败：\(error.localizedDescription)"
+            }
+            self.isUpdatingNetworkExposure = false
+        }
+    }
+
+    public func refreshLANURL() {
+        guard browserAccessEnabled,
+              networkExposure == .lan,
+              !isLoadingLANURL else { return }
+        isLoadingLANURL = true
+        Task { [self] in
+            do {
+                self.lanURL = try await MainWindowController.shared.fetchLANURL()
+            } catch {
+                self.alertMessage = "获取局域网地址失败：\(error.localizedDescription)"
+            }
+            self.isLoadingLANURL = false
+        }
+    }
+
+    public func copyLANURL() {
+        guard !isLoadingLANURL else { return }
+        isLoadingLANURL = true
+        Task { [self] in
+            do {
+                let url = try await MainWindowController.shared.fetchLANURL()
+                self.lanURL = url
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(url.absoluteString, forType: .string)
+                self.showPluginStatus("局域网访问地址已复制（10 分钟内有效）")
+            } catch {
+                self.alertMessage = "获取局域网地址失败：\(error.localizedDescription)"
+            }
+            self.isLoadingLANURL = false
+        }
+    }
+
+    public func openBrowser() {
+        guard browserAccessEnabled, !isOpeningBrowser else { return }
+        isOpeningBrowser = true
+        Task { [self] in
+            do {
+                let url = try await MainWindowController.shared.fetchAuthenticatedBrowserURL()
+                guard NSWorkspace.shared.open(url) else {
+                    throw MainWindowController.BrowserURLError.openFailed
+                }
+            } catch {
+                self.alertMessage = "打开浏览器失败：\(error.localizedDescription)"
+            }
+            self.isOpeningBrowser = false
+        }
     }
 
     public func restartDshService() {
