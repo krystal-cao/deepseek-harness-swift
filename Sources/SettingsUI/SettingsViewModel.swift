@@ -32,6 +32,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var selectedCategoryIndex: Int = 0
     @Published public var latestVersion: String? = nil
     @Published public var nextVersion: String? = nil
+    @Published public var alphaVersion: String? = nil
     @Published public var autoFollowLatest: Bool = false
     @Published public var runtimeChannel: DshRuntimeChannel = .latest
     @Published public var npmRegistry: String = DshVersionManager.defaultRegistry
@@ -143,6 +144,7 @@ public final class SettingsViewModel: ObservableObject {
                   DshVersionManager.normalizedRegistry(npmRegistry) == registry else { return }
             self.latestVersion = res.latest
             self.nextVersion = res.next
+            self.alphaVersion = res.alpha
             self.availableVersions = res.versions
             self.installedVersions = DshVersionManager.shared.listInstalledVersions()
         } catch {
@@ -244,7 +246,15 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     private func updateToChannel(_ channel: DshRuntimeChannel) {
-        let targetVersion = channel == .next ? nextVersion : latestVersion
+        let targetVersion: String?
+        switch channel {
+        case .latest:
+            targetVersion = latestVersion
+        case .next:
+            targetVersion = nextVersion
+        case .alpha:
+            targetVersion = alphaVersion
+        }
         guard let targetVersion,
               let item = availableVersions.first(where: { $0.version == targetVersion }) else {
             alertMessage = "尚未获取到可用的 npm 更新。"
@@ -257,7 +267,15 @@ public final class SettingsViewModel: ObservableObject {
     /// active runtime. This remains separate from the UI so future channels
     /// can reuse the same transaction without restoring arbitrary switching.
     public func updateToVersion(_ version: String) {
-        let selectedTarget = runtimeChannel == .next ? nextVersion : latestVersion
+        let selectedTarget: String?
+        switch runtimeChannel {
+        case .latest:
+            selectedTarget = latestVersion
+        case .next:
+            selectedTarget = nextVersion
+        case .alpha:
+            selectedTarget = alphaVersion
+        }
         guard version == selectedTarget,
               let item = availableVersions.first(where: { $0.version == version }) else {
             alertMessage = "只能更新到当前选定通道的 npm tag 版本。"
@@ -858,7 +876,7 @@ public final class SettingsViewModel: ObservableObject {
         if networkExposure != persistedExposure {
             networkExposure = persistedExposure
         }
-        if runtimeChannel == .next, autoFollowLatest {
+        if runtimeChannel != .latest, autoFollowLatest {
             autoFollowLatest = false
         }
         let normalizedRegistry = DshVersionManager.normalizedRegistry(npmRegistry)
@@ -870,6 +888,7 @@ public final class SettingsViewModel: ObservableObject {
             availableVersions = []
             latestVersion = nil
             nextVersion = nil
+            alphaVersion = nil
         }
         npmRegistry = normalizedRegistry
         DshStateManager.shared.update { state in

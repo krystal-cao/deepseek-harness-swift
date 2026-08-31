@@ -62,11 +62,9 @@ public final class DshVersionManager {
 
     public static func isValidVersion(_ version: String) -> Bool {
         guard let parsed = DshSemanticVersion(version), parsed.buildMetadata.isEmpty else { return false }
-        // Alpha/beta support is intentionally not enabled until an upstream
-        // npm release and its compatibility contract have been verified.
         return parsed.prerelease.isEmpty || (
             parsed.prerelease.count == 2 &&
-            parsed.prerelease[0] == "rc" &&
+            ["alpha", "rc"].contains(parsed.prerelease[0]) &&
             Int(parsed.prerelease[1]) != nil
         )
     }
@@ -224,7 +222,7 @@ public final class DshVersionManager {
     }
 
     /// Fetch version catalog from the npm registry.
-    public func fetchCatalog(registry: String? = nil) async throws -> (latest: String?, next: String?, versions: [DshVersionItem]) {
+    public func fetchCatalog(registry: String? = nil) async throws -> (latest: String?, next: String?, alpha: String?, versions: [DshVersionItem]) {
         let reg = Self.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry)
         let trimmedReg = reg
         guard let url = URL(string: "\(trimmedReg)/@deepseek-ai%2Fdsh") ?? URL(string: "\(trimmedReg)/@deepseek-ai/dsh") else {
@@ -247,6 +245,7 @@ public final class DshVersionManager {
         let distTags = json["dist-tags"] as? [String: String] ?? [:]
         let latestTag = distTags["latest"].flatMap { Self.isValidVersion($0) ? $0 : nil }
         let nextTag = distTags["next"].flatMap { Self.isValidVersion($0) ? $0 : nil }
+        let alphaTag = distTags["alpha"].flatMap { Self.isValidVersion($0) ? $0 : nil }
         let timeDict = json["time"] as? [String: String] ?? [:]
         let versionsDict = json["versions"] as? [String: Any] ?? [:]
 
@@ -271,7 +270,7 @@ public final class DshVersionManager {
             )
         }
 
-        return (latest: latestTag, next: nextTag, versions: items)
+        return (latest: latestTag, next: nextTag, alpha: alphaTag, versions: items)
     }
 
     private func loadDshFamilyPackages() throws -> [String] {

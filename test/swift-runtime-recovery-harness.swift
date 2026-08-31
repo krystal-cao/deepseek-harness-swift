@@ -143,6 +143,8 @@ struct RuntimeRecoveryHarness {
 
         let nextState = DshRuntimeState(updatePolicy: .automaticStable, channel: .next)
         require(nextState.updatePolicy == .notify, "next channel must never persist automatic updates")
+        let alphaState = DshRuntimeState(updatePolicy: .automaticStable, channel: .alpha)
+        require(alphaState.updatePolicy == .notify, "alpha channel must never persist automatic updates")
 
         print("runtime recovery integration harness passed")
     }

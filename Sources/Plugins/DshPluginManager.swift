@@ -659,17 +659,34 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["remove", name] + registryArguments() + ["--reporter=append-only"]
+        // pnpm 11's `remove` command does not accept `--registry`. Removal
+        // only operates on the existing lockfile, so keep the registry in
+        // the environment for any incidental resolution instead of passing
+        // it as an unsupported command-specific option.
+        proc.arguments = ["remove", name, "--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
+        env["npm_config_registry"] = DshVersionManager.normalizedRegistry(
+            DshStateManager.shared.current.npmRegistry
+        )
         proc.environment = env
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
 
         try proc.run()
         proc.waitUntilExit()
 
         guard proc.terminationStatus == 0 else {
-            throw NSError(domain: "DshPluginManager", code: -6, userInfo: [NSLocalizedDescriptionKey: "卸载插件 \(name) 失败"])
+            let detail = processOutput(stdout: stdout, stderr: stderr)
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -6,
+                userInfo: [NSLocalizedDescriptionKey: "卸载插件 \(name) 失败（退出码 \(proc.terminationStatus)）\(detail)"]
+            )
         }
         try updateProfileBundle(name, removing: true)
     }

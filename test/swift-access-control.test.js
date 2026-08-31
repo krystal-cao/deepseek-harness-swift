@@ -159,6 +159,20 @@ test('the managed host webserver dependency is hidden from user plugin managemen
   assert.match(PLUGIN_SOURCE, /proc\.arguments = \["update"\] \+ pluginNames \+ \["--latest"\]/)
 })
 
+test('plugin removal uses pnpm-supported arguments and preserves diagnostics', () => {
+  const removeBlock = PLUGIN_SOURCE.match(
+    /public func removePlugin\(name: String\) async throws \{[\s\S]*?\n    \}\n\n    private func updateProfileBundle/
+  )?.[0]
+  assert.ok(removeBlock)
+  assert.match(removeBlock, /proc\.arguments = \["remove", name, "--reporter=append-only"\]/)
+  assert.doesNotMatch(removeBlock, /registryArguments\(\)/)
+  assert.match(removeBlock, /env\["npm_config_registry"\]/)
+  assert.match(removeBlock, /let stdout = Pipe\(\)/)
+  assert.match(removeBlock, /let stderr = Pipe\(\)/)
+  assert.match(removeBlock, /processOutput\(stdout: stdout, stderr: stderr\)/)
+  assert.match(removeBlock, /退出码 .*proc\.terminationStatus/)
+})
+
 test('the upstream webserver is replaced and all request boundaries share the fence', () => {
   assert.match(HOST_PATCH, /id: webserver[\s\S]*disabled: true/)
   assert.match(HOST_PATCH, /name: dsh-desktop-host\/webserver/)

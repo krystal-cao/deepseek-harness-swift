@@ -10,11 +10,29 @@ public struct VersionsTabView: View {
     }
 
     private var targetVersion: String? {
-        viewModel.runtimeChannel == .next ? viewModel.nextVersion : viewModel.latestVersion
+        switch viewModel.runtimeChannel {
+        case .latest:
+            return viewModel.latestVersion
+        case .next:
+            return viewModel.nextVersion
+        case .alpha:
+            return viewModel.alphaVersion
+        }
     }
 
     private var channelName: String {
-        viewModel.runtimeChannel == .next ? "next" : "latest"
+        viewModel.runtimeChannel.rawValue
+    }
+
+    private var channelDescription: String {
+        switch viewModel.runtimeChannel {
+        case .latest:
+            return "使用当前 npm Registry 的 latest tag；这是推荐的稳定更新通道。"
+        case .next:
+            return "只使用当前 npm Registry 的 next tag；仅手动更新，仍禁止 Beta、降级和 GitHub-only 版本。"
+        case .alpha:
+            return "只使用当前 npm Registry 的 alpha tag；仅手动更新，仍禁止 Beta、降级和 GitHub-only 版本。"
+        }
     }
 
     private var automaticUpdatesAllowed: Bool {
@@ -26,7 +44,7 @@ public struct VersionsTabView: View {
             get: { viewModel.runtimeChannel },
             set: {
                 viewModel.runtimeChannel = $0
-                if $0 == .next {
+                if $0 != .latest {
                     viewModel.autoFollowLatest = false
                 }
                 viewModel.saveGeneralSettings()
@@ -96,9 +114,9 @@ public struct VersionsTabView: View {
                     SettingsRow(
                         title: automaticUpdatesAllowed
                             ? (viewModel.autoFollowLatest ? "自动更新已开启" : "自动更新已关闭")
-                            : "next 通道已禁用自动更新",
+                            : "\(channelName) 通道已禁用自动更新",
                         description: !automaticUpdatesAllowed
-                            ? "next 通道不允许自动安装；切回 stable（latest）后才可以重新启用。"
+                            ? "\(channelName) 通道不允许自动安装；切回 stable（latest）后才可以重新启用。"
                             : (viewModel.autoFollowLatest
                                 ? "启动后自动安装并切换到 npm latest 的更高版本，完成服务和页面验证后重启 DSH。"
                                 : "启动后只检查选定通道中的 npm 更新，不会自动安装。")
@@ -125,16 +143,15 @@ public struct VersionsTabView: View {
                     SettingsDivider()
 
                     SettingsRow(
-                        title: viewModel.runtimeChannel == .next ? "更新通道：next" : "更新通道：latest",
-                        description: viewModel.runtimeChannel == .next
-                            ? "只使用当前 npm Registry 的 next tag；仍禁止 Alpha、Beta、降级和 GitHub-only 版本。"
-                            : "使用当前 npm Registry 的 latest tag；这是推荐的稳定更新通道。"
+                        title: "更新通道：\(channelName)",
+                        description: channelDescription
                     ) {
                         Picker("", selection: runtimeChannelSelection) {
                             Text("latest").tag(DshRuntimeChannel.latest)
                             Text("next").tag(DshRuntimeChannel.next)
+                            Text("alpha").tag(DshRuntimeChannel.alpha)
                         }
-                        .pickerStyle(.segmented)
+                        .pickerStyle(.menu)
                         .controlSize(.small)
                         .frame(width: 150, alignment: .trailing)
                     }

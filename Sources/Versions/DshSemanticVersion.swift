@@ -2,9 +2,9 @@ import Foundation
 
 /// A SemVer 2.0.0 value used for ordering DSH releases.
 ///
-/// The runtime manager still applies its own product policy and currently
-/// allows only stable and `rc.N` releases. Keeping the parser complete means
-/// version ordering will not need to change when the policy is widened later.
+/// The runtime manager still applies its own product policy and allows stable,
+/// `alpha.N`, and `rc.N` releases. Keeping the parser complete means version
+/// ordering remains independent from the channel policy.
 public struct DshSemanticVersion: Comparable, Sendable {
     public let major: Int
     public let minor: Int

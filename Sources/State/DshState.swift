@@ -13,6 +13,7 @@ public enum DshRuntimeUpdatePolicy: String, Codable, Sendable {
 public enum DshRuntimeChannel: String, Codable, Sendable {
     case latest
     case next
+    case alpha
 }
 
 public enum DshRuntimeTransactionPhase: String, Codable, Sendable {
@@ -68,7 +69,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         self.previous = previous
         self.pending = pending
         self.phase = phase
-        self.updatePolicy = channel == .next ? .notify : updatePolicy
+        self.updatePolicy = channel == .latest ? updatePolicy : .notify
         self.channel = channel
         self.dismissedVersion = dismissedVersion
         self.dismissedAppVersion = dismissedAppVersion
@@ -99,7 +100,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         self.phase = try container.decodeIfPresent(DshRuntimeTransactionPhase.self, forKey: .phase) ?? .idle
         self.updatePolicy = try container.decodeIfPresent(DshRuntimeUpdatePolicy.self, forKey: .updatePolicy) ?? .notify
         self.channel = try container.decodeIfPresent(DshRuntimeChannel.self, forKey: .channel) ?? .latest
-        if self.channel == .next {
+        if self.channel != .latest {
             self.updatePolicy = .notify
         }
         self.dismissedVersion = try container.decodeIfPresent(String.self, forKey: .dismissedVersion)

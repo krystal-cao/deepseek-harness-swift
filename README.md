@@ -135,8 +135,8 @@ npm test
 ## 版本与更新
 
 - Swift 应用版本和构建号独立维护在 [Version.xcconfig](Version.xcconfig) 中。
-- Swift 应用版本不等同于 DSH npm 运行时版本；后者在应用内的版本管理页单独检查并升级到 npm `latest` 或用户明确选择的 `next`。启动、插件操作和 Runtime 更新共享串行事务门，避免并发重启。
-- Runtime 版本目录以 npm Registry 为唯一来源；当前只接受 stable 与 `rc.N` 版本，GitHub 独有版本、alpha/beta 及任意降级暂不参与运行时选择。
+- Swift 应用版本不等同于 DSH npm 运行时版本；后者在应用内的版本管理页单独检查并升级到 npm `latest`、`next` 或用户明确选择的 `alpha`。启动、插件操作和 Runtime 更新共享串行事务门，避免并发重启。
+- Runtime 版本目录以 npm Registry 为唯一来源；当前只接受 stable、`alpha.N` 与 `rc.N` 版本，GitHub 独有版本、beta 及任意降级暂不参与运行时选择。
 - Sparkle 公钥写入 [Info.plist](Info.plist)，Ed25519 私钥只保存在发布机器的 Keychain 中，禁止提交到仓库。
 - 当前更新 feed 位于 `appcast-swift.xml`，发布新版本时需要先构建两个架构的 DMG，再使用 Sparkle `sign_update` 生成签名并更新 feed。
 
@@ -145,7 +145,7 @@ npm test
 - 当前使用 ad-hoc 签名，未提供 Developer ID 签名和 notarization。
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - 应用更新和 DSH npm 运行时更新是两套独立流程。
-- 当前只提供从已安装 Runtime 向 npm `latest`/`next` tag 的单向升级；默认仅通知不自动安装，`next` 只能由用户明确选择；更新失败的版本会抑制到 npm tag 变化、应用升级或用户手动重试；旧版本会保留到新 Runtime 连续两次成功启动后自动清理，暂不提供任意版本切换、卸载或降级入口。
+- 当前只提供从已安装 Runtime 向 npm `latest`/`next`/`alpha` tag 的单向升级；默认仅通知不自动安装，`next` 和 `alpha` 只能由用户明确选择；更新失败的版本会抑制到 npm tag 变化、应用升级或用户手动重试；旧版本会保留到新 Runtime 连续两次成功启动后自动清理，暂不提供任意版本切换、卸载或降级入口。
 - 目前仅提供 macOS 13+、Apple Silicon 与 Intel 构建。
 
 ## 许可证
