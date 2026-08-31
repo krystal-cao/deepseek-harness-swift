@@ -1,3 +1,4 @@
+# Local build and development artifacts
 .build/
 dist/
 assets/node/
