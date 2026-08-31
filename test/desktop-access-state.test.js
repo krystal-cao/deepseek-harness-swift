@@ -682,6 +682,26 @@ test('upstream session socket leases can move a reused socket between sessions',
   }
 })
 
+test('released broker sockets are removed when the underlying connection later closes', () => {
+  const broker = createUpstreamSessionBroker({ state: managedState({ ordinaryBrowserEnabled: true }), backendPort: 3187 })
+  const socket = new EventEmitter()
+  let destroyCalls = 0
+  socket.destroyed = false
+  socket.destroy = () => {
+    destroyCalls += 1
+    socket.destroyed = true
+    socket.emit('close')
+  }
+
+  const release = broker.trackSocket(socket)
+  release()
+  // Releasing a session lease must not remove the broker's connection
+  // lifecycle listener. The close event is what removes the global socket.
+  socket.emit('close')
+  broker.clear()
+  assert.equal(destroyCalls, 0)
+})
+
 test('LAN ingress brokers B plus upstream U against the alpha.2 fixture while exposing only L', async (t) => {
   const fixture = await createUpstreamAuthFixture({ mode: 'alpha' })
   t.after(() => fixture.close())

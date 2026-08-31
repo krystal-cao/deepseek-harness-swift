@@ -141,6 +141,87 @@ public final class SettingsViewModel: ObservableObject {
         isRuntimeRecoveryPending = DshStateManager.shared.current.runtimeState.pending != nil
     }
 
+    /// Recover a Profile switch that was interrupted by force-quitting the
+    /// app, a crash, or a failed in-process restore. The persisted
+    /// `appProfile` is the target while a switch is in flight, so startup must
+    /// always return to the Profile that was healthy before the transaction.
+    /// Cleanup is limited to the web bridge artifacts owned by this app; user
+    /// plugins and shared credentials are never removed.
+    public func recoverPendingProfileSwitch() async {
+        let state = DshStateManager.shared.current
+        guard let transaction = state.pendingProfileSwitch else { return }
+
+        // When leaving web, the desktop target is already healthy once the
+        // transaction reaches finalizing; only the source cleanup remains.
+        // Before that point, keep the original web Profile intact so it can
+        // still be restored safely.
+        let targetWasHealthy = transaction.phase == .finalizing
+            && state.appProfile == transaction.to
+        let restoreProfile = targetWasHealthy ? transaction.to : transaction.from
+        let requiresWebCleanup = transaction.to == .web
+            || (transaction.from == .web && transaction.to == .desktop && targetWasHealthy)
+
+        // Make the safe Profile durable before touching the shared web tree.
+        // If cleanup is interrupted, the next launch still starts the known
+        // healthy Profile and retries only the app-owned cleanup.
+        DshStateManager.shared.update { state in
+            guard state.pendingProfileSwitch == transaction else { return }
+            state.appProfile = restoreProfile
+        }
+        self.appProfile = restoreProfile
+        self.isSwitchingProfile = false
+
+        var cleanupError: Error?
+        if requiresWebCleanup {
+            do {
+                try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+            } catch {
+                cleanupError = error
+            }
+        }
+
+        if cleanupError == nil {
+            DshStateManager.shared.update { state in
+                guard state.pendingProfileSwitch == transaction else { return }
+                state.pendingProfileSwitch = nil
+            }
+        }
+
+        // Refresh all published settings after the durable state transition;
+        // this also keeps the Profile picker and plugin list consistent before
+        // MainWindowController starts the service.
+        loadFromState()
+        if let cleanupError {
+            alertMessage = "检测到未完成的 Profile 切换，已恢复 \(restoreProfile.rawValue)，但 web 桥接清理失败，将在下次启动重试：\(cleanupError.localizedDescription)"
+        } else {
+            alertMessage = "检测到未完成的 Profile 切换，已恢复 \(restoreProfile.rawValue)。"
+        }
+    }
+
+    /// Retry cleanup after startup has verified the Profile selected by a
+    /// previously interrupted switch. This covers a transient pnpm failure
+    /// without blocking the safe Profile from launching.
+    public func retryPendingProfileSwitchCleanup() async {
+        let state = DshStateManager.shared.current
+        guard let transaction = state.pendingProfileSwitch else { return }
+        let targetWasHealthy = transaction.phase == .finalizing
+            && state.appProfile == transaction.to
+        let desktopSourceFailure = transaction.from == .desktop
+            && transaction.to == .web
+            && state.appProfile == .desktop
+        guard targetWasHealthy || desktopSourceFailure else { return }
+
+        do {
+            try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+            DshStateManager.shared.update { state in
+                guard state.pendingProfileSwitch == transaction else { return }
+                state.pendingProfileSwitch = nil
+            }
+        } catch {
+            alertMessage = "web 桥接清理仍失败，将在下次启动重试：\(error.localizedDescription)"
+        }
+    }
+
     /// Refresh the profile-based theme state after plugin changes or when the
     /// general settings page becomes visible.
     public func refreshExternalTheme() {
@@ -1010,6 +1091,10 @@ public final class SettingsViewModel: ObservableObject {
               !isInstallingVersion else { return }
 
         let state = DshStateManager.shared.current
+        guard state.pendingProfileSwitch == nil else {
+            alertMessage = "上一次 Profile 切换尚未完成恢复，请重启 DSH 后再试。"
+            return
+        }
         if state.runtimeState.pending != nil,
            profile != state.runtimeState.profile {
             alertMessage = "Runtime 回滚尚未完成，只能使用 \(state.runtimeState.profile.rawValue) Profile；为保护 Profile 数据，暂不允许切换。"
@@ -1018,6 +1103,22 @@ public final class SettingsViewModel: ObservableObject {
 
         let previous = appProfile
         let leavingSharedWeb = previous == .web && profile == .desktop
+        let transaction = DshProfileSwitchTransaction(from: previous, to: profile)
+
+        // Persist the transaction together with the target Profile before any
+        // pnpm or Node work begins. A force-quit after this point can therefore
+        // be repaired deterministically during the next app launch.
+        var didPersistTransaction = false
+        DshStateManager.shared.update { state in
+            guard state.appProfile == previous, state.pendingProfileSwitch == nil else { return }
+            state.appProfile = profile
+            state.pendingProfileSwitch = transaction
+            didPersistTransaction = true
+        }
+        guard didPersistTransaction else {
+            loadFromState()
+            return
+        }
         appProfile = profile
         saveGeneralSettings()
         isSwitchingProfile = true
@@ -1025,22 +1126,85 @@ public final class SettingsViewModel: ObservableObject {
 
         Task { [self] in
             do {
-                try await MainWindowController.shared.withRuntimeOperation {
+                let cleanupError = try await MainWindowController.shared.withRuntimeOperation { () -> Error? in
                     if leavingSharedWeb {
                         await DshService.shared.stopAndWait()
-                        try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
                     }
                     _ = try await MainWindowController.shared.restartDshServiceDuringOperation()
+
+                    var cleanupError: Error?
+                    var finalizingTransaction = transaction
+                    if leavingSharedWeb {
+                        // The desktop target is already healthy. Mark this
+                        // phase before touching the shared web tree so a
+                        // force-quit can keep desktop and retry cleanup.
+                        finalizingTransaction.phase = .finalizing
+                        DshStateManager.shared.update { state in
+                            guard state.pendingProfileSwitch == transaction else { return }
+                            state.pendingProfileSwitch = finalizingTransaction
+                        }
+                        do {
+                            try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+                        } catch {
+                            cleanupError = error
+                        }
+                    }
+
+                    // Commit only after the target Profile has passed the
+                    // complete startup and health gate. This closes the small
+                    // window where a successful restart could be followed by
+                    // a force-quit before the UI task resumes.
+                    DshStateManager.shared.update { state in
+                        guard let pending = state.pendingProfileSwitch,
+                              pending.from == transaction.from,
+                              pending.to == transaction.to else { return }
+                        state.appProfile = profile
+                        state.pendingProfileSwitch = cleanupError == nil ? nil : finalizingTransaction
+                    }
+                    return cleanupError
                 }
                 self.refreshPlugins()
                 self.isSwitchingProfile = false
-                self.showPluginStatus("已切换到 \(profile.rawValue) Profile，服务已重启")
+                if let cleanupError {
+                    self.alertMessage = "已切换到 \(profile.rawValue) Profile，服务已重启，但 web 桥接清理失败，将在下次启动重试：\(cleanupError.localizedDescription)"
+                } else {
+                    self.showPluginStatus("已切换到 \(profile.rawValue) Profile，服务已重启")
+                }
             } catch {
+                // Keep the transaction marker while restoring. If this task
+                // is interrupted, startup will still know to return to the
+                // previous Profile and retry web cleanup.
+                DshStateManager.shared.update { state in
+                    guard state.pendingProfileSwitch == transaction else { return }
+                    state.appProfile = previous
+                }
                 self.appProfile = previous
                 self.saveGeneralSettings()
                 var restoreError: Error?
+                var restoreCleanupError: Error?
                 do {
-                    _ = try await MainWindowController.shared.restartDshService()
+                    restoreCleanupError = try await MainWindowController.shared.withRuntimeOperation { () -> Error? in
+                        await DshService.shared.stopAndWait()
+                        var cleanupError: Error?
+                        if profile == .web && previous == .desktop {
+                            do {
+                                try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+                            } catch {
+                                // Bridge cleanup is app-owned housekeeping. It
+                                // must not prevent the known-good desktop
+                                // service from coming back; leave the marker
+                                // pending so startup can retry the cleanup.
+                                cleanupError = error
+                            }
+                        }
+                        _ = try await MainWindowController.shared.restartDshServiceDuringOperation()
+                        DshStateManager.shared.update { state in
+                            guard state.pendingProfileSwitch == transaction else { return }
+                            state.appProfile = previous
+                            state.pendingProfileSwitch = cleanupError == nil ? nil : transaction
+                        }
+                        return cleanupError
+                    }
                     self.refreshPlugins()
                 } catch {
                     restoreError = error
@@ -1048,6 +1212,8 @@ public final class SettingsViewModel: ObservableObject {
                 self.isSwitchingProfile = false
                 if let restoreError {
                     self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，原 Profile 也无法恢复：\(restoreError.localizedDescription)"
+                } else if let restoreCleanupError {
+                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile，但 web 桥接清理失败，将在下次启动重试：\(restoreCleanupError.localizedDescription)"
                 } else {
                     self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile：\(error.localizedDescription)"
                 }

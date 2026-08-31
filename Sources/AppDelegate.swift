@@ -16,6 +16,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // the UI responsive and let MainWindowController perform the one
             // actual snapshot restore immediately before the old Runtime is
             // started.
+            // Profile switches are persisted separately from Runtime update
+            // transactions. Recover them first so a force-quit during a
+            // failed web switch can never make startup retry the bad Profile.
+            await SettingsViewModel.shared.recoverPendingProfileSwitch()
             await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
             await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
             _ = await Task.detached(priority: .utility) {

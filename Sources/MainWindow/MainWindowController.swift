@@ -235,6 +235,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                     SettingsViewModel.shared.refreshPlugins()
                     await SettingsViewModel.shared.recordHealthyRuntimeStart()
                     await SettingsViewModel.shared.finalizeRecoveredRuntimeAfterSuccessfulStart()
+                    await SettingsViewModel.shared.retryPendingProfileSwitchCleanup()
                     return session
                 }
             } catch {

@@ -92,6 +92,26 @@ function removeLanMapping(state, entry, browserToken) {
 export function createUpstreamSessionBroker({ state, backendPort, getConnection }) {
   const sessions = new Map();
   const sockets = new Set();
+  const socketLifecycleRemovers = new Map();
+
+  // A socket can carry several HTTP requests over keep-alive, and each
+  // request may acquire/release a different session lease. Keep the broker's
+  // global connection lifecycle independent from those short-lived leases so
+  // a released-but-still-open socket remains revocable, while a later close
+  // can always remove it from the global set.
+  function trackGlobalSocket(socket) {
+    if (!socket || sockets.has(socket)) return;
+    sockets.add(socket);
+    const remove = () => {
+      sockets.delete(socket);
+      socketLifecycleRemovers.delete(socket);
+      socket.off?.("close", remove);
+      socket.off?.("error", remove);
+    };
+    socketLifecycleRemovers.set(socket, remove);
+    socket.once?.("close", remove);
+    socket.once?.("error", remove);
+  }
 
   const broker = {
     async cookiesFor(browserToken, lanCredential) {
@@ -157,10 +177,9 @@ export function createUpstreamSessionBroker({ state, backendPort, getConnection 
 
     trackSocket(socket, browserToken) {
       if (!socket) return () => {};
-      sockets.add(socket);
+      trackGlobalSocket(socket);
       let entry;
       let released = false;
-      const remove = () => sockets.delete(socket);
       function release() {
         if (released) return;
         released = true;
@@ -177,11 +196,9 @@ export function createUpstreamSessionBroker({ state, backendPort, getConnection 
       }
       function onClose() {
         release();
-        remove();
       }
       function onError() {
         release();
-        remove();
       }
       if (browserToken !== undefined) {
         entry = sessions.get(browserToken);
@@ -204,6 +221,7 @@ export function createUpstreamSessionBroker({ state, backendPort, getConnection 
       sessions.clear();
       for (const socket of sockets) socket.destroy?.();
       sockets.clear();
+      socketLifecycleRemovers.clear();
     },
 
     size() {

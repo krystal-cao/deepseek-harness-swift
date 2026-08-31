@@ -62,6 +62,38 @@ public enum DshAppProfile: String, Codable, CaseIterable, Hashable, Sendable {
     }
 }
 
+/// A Profile switch is persisted before the target Profile is started. The
+/// app may be terminated while pnpm or Node is materializing the target tree;
+/// on the next launch this record tells startup which Profile was known to be
+/// healthy and must be restored.
+public struct DshProfileSwitchTransaction: Codable, Equatable, Sendable {
+    public var from: DshAppProfile
+    public var to: DshAppProfile
+    public var phase: DshProfileSwitchPhase
+    public var startedAt: Date
+
+    public init(
+        from: DshAppProfile,
+        to: DshAppProfile,
+        phase: DshProfileSwitchPhase = .switching,
+        startedAt: Date = Date()
+    ) {
+        self.from = from
+        self.to = to
+        self.phase = phase
+        self.startedAt = startedAt
+    }
+}
+
+/// The target service is not considered committed until its startup and
+/// health gate pass. The finalizing phase is used only when switching away
+/// from the shared web Profile: desktop is already healthy, while web bridge
+/// cleanup remains retryable.
+public enum DshProfileSwitchPhase: String, Codable, Sendable {
+    case switching
+    case finalizing
+}
+
 public enum DshRuntimeTransactionPhase: String, Codable, Sendable {
     case idle
     case staging
@@ -297,6 +329,11 @@ public enum DshRuntimeTransaction {
 public struct DshStateConfig: Codable, Equatable {
     public var selectedVersion: String?
     public var appProfile: DshAppProfile
+    /// Non-nil while a Profile switch has not yet completed its startup and
+    /// cleanup gates. This is intentionally separate from Runtime update
+    /// state: switching to the shared web Profile must be recoverable without
+    /// taking or restoring a Runtime snapshot.
+    public var pendingProfileSwitch: DshProfileSwitchTransaction?
     public var dismissedLatest: String?
     public var autoFollowLatest: Bool
     public var npmRegistry: String?
@@ -311,6 +348,7 @@ public struct DshStateConfig: Codable, Equatable {
     public init(
         selectedVersion: String? = nil,
         appProfile: DshAppProfile = .desktop,
+        pendingProfileSwitch: DshProfileSwitchTransaction? = nil,
         dismissedLatest: String? = nil,
         autoFollowLatest: Bool = false,
         npmRegistry: String? = nil,
@@ -324,6 +362,7 @@ public struct DshStateConfig: Codable, Equatable {
     ) {
         self.selectedVersion = selectedVersion
         self.appProfile = appProfile
+        self.pendingProfileSwitch = pendingProfileSwitch
         self.dismissedLatest = dismissedLatest
         self.autoFollowLatest = autoFollowLatest
         self.npmRegistry = npmRegistry
@@ -339,6 +378,7 @@ public struct DshStateConfig: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case selectedVersion
         case appProfile
+        case pendingProfileSwitch
         case dismissedLatest
         case autoFollowLatest
         case npmRegistry
@@ -358,6 +398,7 @@ public struct DshStateConfig: Codable, Equatable {
         // intentionally migrate to an isolated desktop profile; the old web
         // directory is left untouched for terminal DSH usage.
         self.appProfile = try container.decodeIfPresent(DshAppProfile.self, forKey: .appProfile) ?? .desktop
+        self.pendingProfileSwitch = try container.decodeIfPresent(DshProfileSwitchTransaction.self, forKey: .pendingProfileSwitch)
         self.dismissedLatest = try container.decodeIfPresent(String.self, forKey: .dismissedLatest)
         // New profiles default to notification-only updates. If an older
         // profile explicitly persisted autoFollowLatest, preserve that user
@@ -389,6 +430,7 @@ public struct DshStateConfig: Codable, Equatable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(selectedVersion, forKey: .selectedVersion)
         try container.encode(appProfile, forKey: .appProfile)
+        try container.encodeIfPresent(pendingProfileSwitch, forKey: .pendingProfileSwitch)
         try container.encodeIfPresent(dismissedLatest, forKey: .dismissedLatest)
         try container.encode(autoFollowLatest, forKey: .autoFollowLatest)
         try container.encodeIfPresent(npmRegistry, forKey: .npmRegistry)

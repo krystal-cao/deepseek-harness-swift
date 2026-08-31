@@ -49,6 +49,25 @@ struct RuntimeRecoveryHarness {
             channel: .latest
         )
 
+        // Profile switches must survive a process interruption with enough
+        // information to restore the previously healthy Profile.
+        let profileSwitch = DshProfileSwitchTransaction(
+            from: .desktop,
+            to: .web,
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        var interruptedProfileState = DshStateConfig(
+            appProfile: .web,
+            pendingProfileSwitch: profileSwitch,
+            autoFollowLatest: false
+        )
+        let encodedProfileState = try! JSONEncoder().encode(interruptedProfileState)
+        let decodedProfileState = try! JSONDecoder().decode(DshStateConfig.self, from: encodedProfileState)
+        require(decodedProfileState.pendingProfileSwitch == profileSwitch, "Profile switch transaction must persist")
+        interruptedProfileState.appProfile = profileSwitch.from
+        interruptedProfileState.pendingProfileSwitch = nil
+        require(interruptedProfileState.appProfile == .desktop, "Profile recovery must restore the source Profile")
+
         // Inject a candidate-install failure before activation. The old
         // active descriptor must survive the rollback transition.
         var candidateInstallFailure = DshRuntimeTransaction.beginRollback(initial)
