@@ -56,6 +56,7 @@ public final class DshPluginManager {
         "browser-url-route.js",
         "lan-url-route.js",
         "lan-http-ingress.js",
+        "upstream-session-broker.js",
         "control.js",
         "access-state.js",
         "cordis.patch.yml",
@@ -1188,6 +1189,137 @@ public final class DshPluginManager {
             throw NSError(domain: "DshPluginManager", code: -15, userInfo: [NSLocalizedDescriptionKey: "内置桥接插件安装后未正确挂载"])
         }
         return true
+    }
+
+    /// Repair an incomplete application-owned Profile install before DSH is
+    /// launched. `dsh plugin` deliberately forwards pnpm arguments verbatim,
+    /// so a Profile created during a fresh DSH family release can be left with
+    /// a lockfile but without a complete `node_modules` tree when pnpm's
+    /// minimum-release-age policy rejects the just-published packages.
+    ///
+    /// This is intentionally lazy and scoped to the Profile used by the app:
+    /// healthy profiles are not reinstalled, and the global pnpm configuration is never changed.
+    /// The install is allowed to use zero
+    /// release age only because the app is materializing its own pinned Profile
+    /// lockfile; --frozen-lockfile prevents this repair from resolving new
+    /// user dependencies, while pnpm still verifies the lockfile integrity and
+    /// registry data.
+    @discardableResult
+    public func repairProfileDependenciesIfNeeded(registry: String? = nil) async throws -> Bool {
+        guard DshStateManager.shared.current.appProfile == .desktop else {
+            // The web Profile is intentionally shared with the terminal CLI.
+            // Never repair or reinstall that user-owned dependency tree during
+            // an app launch.
+            return false
+        }
+        let profileDir = Self.activeProfileDirectory
+        let packageURL = profileDir.appendingPathComponent("package.json")
+        let lockfileURL = profileDir.appendingPathComponent("pnpm-lock.yaml")
+        guard FileManager.default.fileExists(atPath: lockfileURL.path) else {
+            // A new profile has no lockfile yet. The managed Host reconciliation
+            // below the caller owns that first-install path.
+            return false
+        }
+        guard let data = try? Data(contentsOf: packageURL),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let dependencies = root["dependencies"] as? [String: Any],
+              !dependencies.isEmpty else {
+            return false
+        }
+
+        guard profileDependenciesNeedInstall(dependencies, profileDir: profileDir) else {
+            return false
+        }
+        guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
+              let node = NodeRuntime.shared.resolveNodeBinary() else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -19,
+                userInfo: [NSLocalizedDescriptionKey: "Desktop Profile 依赖不完整，但找不到 Node 或 pnpm，无法自动修复"]
+            )
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: pnpm)
+        proc.currentDirectoryURL = profileDir
+        proc.arguments = [
+            "install",
+            "--frozen-lockfile",
+            "--config.minimum-release-age=0",
+            "--registry", DshVersionManager.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry),
+            "--prefer-offline",
+            "--reporter=append-only"
+        ]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+
+        var env = NodeRuntime.shared.buildEnvironment()
+        env["DSH_NODE_BIN"] = node
+        proc.environment = env
+
+        guard (try? proc.run()) != nil else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -20,
+                userInfo: [NSLocalizedDescriptionKey: "无法启动 Desktop Profile 依赖修复"]
+            )
+        }
+        proc.waitUntilExit()
+        guard proc.terminationStatus == 0 else {
+            let detail = processOutput(stdout: stdout, stderr: stderr)
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -21,
+                userInfo: [NSLocalizedDescriptionKey: "Desktop Profile 依赖修复失败（退出码 \(proc.terminationStatus)）。如果需要手动修复，请执行：dsh plugin --profile desktop install --config.minimum-release-age=0\(detail)"]
+            )
+        }
+
+        guard !profileDependenciesNeedInstall(dependencies, profileDir: profileDir) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -22,
+                userInfo: [NSLocalizedDescriptionKey: "Desktop Profile 依赖修复完成，但仍有依赖未物化；请打开设置查看详细错误"]
+            )
+        }
+        return true
+    }
+
+    private func profileDependenciesNeedInstall(
+        _ dependencies: [String: Any],
+        profileDir: URL
+    ) -> Bool {
+        let modulesManifest = profileDir
+            .appendingPathComponent("node_modules", isDirectory: true)
+            .appendingPathComponent(".modules.yaml")
+        guard FileManager.default.fileExists(atPath: modulesManifest.path) else {
+            return true
+        }
+
+        return dependencies.keys.contains { name in
+            guard let packageManifest = packageManifestURL(name: name, profileDir: profileDir) else {
+                return true
+            }
+            return !FileManager.default.fileExists(atPath: packageManifest.path)
+        }
+    }
+
+    private func packageManifestURL(name: String, profileDir: URL) -> URL? {
+        let parts = name.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count == 1 || (parts.count == 2 && parts[0].hasPrefix("@")),
+              parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+
+        let nodeModules = profileDir.appendingPathComponent("node_modules", isDirectory: true)
+        let packageURL = parts.reduce(nodeModules) { $0.appendingPathComponent($1, isDirectory: true) }
+            .appendingPathComponent("package.json")
+        let root = nodeModules.standardizedFileURL.path
+        let candidate = packageURL.standardizedFileURL.path
+        guard candidate.hasPrefix(root + "/") else { return nil }
+        return packageURL
     }
 
     private func validateDesktopHostBundle(_ path: String) throws {

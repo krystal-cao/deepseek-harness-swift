@@ -5,6 +5,8 @@ public enum DshProcessIOError: Error, LocalizedError, Sendable {
     case processExited(String)
     case generationMismatch
     case policyMismatch
+    case endpointConflict
+    case invalidEndpoint(String)
 
     public var errorDescription: String? {
         switch self {
@@ -16,6 +18,10 @@ public enum DshProcessIOError: Error, LocalizedError, Sendable {
             return "DSH 桌面控制代际不匹配。"
         case .policyMismatch:
             return "DSH 桌面浏览器访问策略确认不匹配。"
+        case .endpointConflict:
+            return "DSH 进程报告了相互冲突的 Web 地址。"
+        case .invalidEndpoint(let detail):
+            return detail.isEmpty ? "DSH 进程报告了无效的 Web 地址。" : "DSH 进程报告了无效的 Web 地址：\(detail)"
         }
     }
 }
@@ -24,7 +30,7 @@ public enum DshProcessIOError: Error, LocalizedError, Sendable {
 /// readiness only after both the Web URL and the matching desktop handshake.
 public final class DshProcessIO: @unchecked Sendable {
     private static let readyRegex = try! NSRegularExpression(
-        pattern: #"dsh web: (http://127\.0\.0\.1:\d+)\b"#
+        pattern: #"dsh web:\s+(\S+)"#
     )
     private static let controlReadyRegex = try! NSRegularExpression(
         pattern: #"dsh desktop control ready: ([0-9A-Fa-f-]{36})\b"#
@@ -38,15 +44,16 @@ public final class DshProcessIO: @unchecked Sendable {
     private let stdoutPipe: Pipe
     private let stderrPipe: Pipe
     private let expectedGeneration: UUID
-    private let secrets: [String]
+    private let expectedAuthMode: DshAuthMode?
+    private let redactor: DshSecretRedactor
     private let lock = NSLock()
 
     private var stdoutPartial = ""
     private var stderrPartial = ""
     private var ringBuffer = Data()
-    private var webURL: URL?
+    private var webEndpoint: DshWebEndpoint?
     private var controlReadyGeneration: UUID?
-    private var readyContinuation: CheckedContinuation<URL, Error>?
+    private var readyContinuation: CheckedContinuation<DshWebEndpoint, Error>?
     private var readyTimeoutTask: DispatchWorkItem?
     private var readySettled = false
     private var policyAcks: [Int: (generation: UUID, enabled: Bool, exposure: DshNetworkExposure)] = [:]
@@ -62,14 +69,20 @@ public final class DshProcessIO: @unchecked Sendable {
         stdoutPipe: Pipe,
         stderrPipe: Pipe,
         expectedGeneration: UUID,
+        expectedPort: Int = 3080,
+        expectedAuthMode: DshAuthMode? = nil,
         secrets: [String] = []
     ) {
         self.proc = proc
         self.stdoutPipe = stdoutPipe
         self.stderrPipe = stderrPipe
         self.expectedGeneration = expectedGeneration
-        self.secrets = secrets.filter { !$0.isEmpty }
+        self.expectedPort = expectedPort
+        self.expectedAuthMode = expectedAuthMode
+        self.redactor = DshSecretRedactor(secrets: secrets)
     }
+
+    private let expectedPort: Int
 
     public func start() {
         lock.lock()
@@ -91,12 +104,12 @@ public final class DshProcessIO: @unchecked Sendable {
         }
     }
 
-    public func waitForReady(timeout: TimeInterval = 60) async throws -> URL {
+    public func waitForReady(timeout: TimeInterval = 60) async throws -> DshWebEndpoint {
         try await withCheckedThrowingContinuation { continuation in
-            var immediateResult: Result<URL, Error>?
+            var immediateResult: Result<DshWebEndpoint, Error>?
             lock.lock()
-            if let webURL, controlReadyGeneration == expectedGeneration {
-                immediateResult = .success(webURL)
+            if let webEndpoint, controlReadyGeneration == expectedGeneration {
+                immediateResult = .success(webEndpoint)
             } else if let terminalError {
                 immediateResult = .failure(terminalError)
             } else {
@@ -175,6 +188,7 @@ public final class DshProcessIO: @unchecked Sendable {
     private func consume(_ data: Data, isStdout: Bool, handle: FileHandle) {
         guard !data.isEmpty else {
             handle.readabilityHandler = nil
+            finishPartial(isStdout: isStdout)
             return
         }
         guard let chunk = String(data: data, encoding: .utf8) else {
@@ -198,7 +212,7 @@ public final class DshProcessIO: @unchecked Sendable {
             }
         }
         for line in lines {
-            let redacted = redact(line)
+            let redacted = redactor.redact(line)
             ringBuffer.append(contentsOf: Data((redacted + "\n").utf8))
         }
         if ringBuffer.count > Self.maxLogBytes {
@@ -212,20 +226,37 @@ public final class DshProcessIO: @unchecked Sendable {
     }
 
     private func inspect(_ line: String) {
-        let range = NSRange(line.startIndex..., in: line)
-        if let match = Self.readyRegex.firstMatch(in: line, range: range),
-           let urlRange = Range(match.range(at: 1), in: line),
-           let url = URL(string: String(line[urlRange])) {
-            lock.lock()
-            webURL = url
-            lock.unlock()
-            resolveReadyIfPossible()
+        let normalizedLine = DshSecretRedactor.stripANSI(line)
+        let range = NSRange(normalizedLine.startIndex..., in: normalizedLine)
+        if let match = Self.readyRegex.firstMatch(in: normalizedLine, range: range),
+           let urlRange = Range(match.range(at: 1), in: normalizedLine),
+           let url = URL(string: String(normalizedLine[urlRange])) {
+            do {
+                let endpoint = try DshWebEndpoint.parse(url, expectedPort: expectedPort)
+                if let expectedAuthMode, endpoint.authMode != expectedAuthMode {
+                    failReady(DshProcessIOError.invalidEndpoint("认证模式与运行时契约不匹配。"))
+                    return
+                }
+                lock.lock()
+                let isConflict = webEndpoint != nil && webEndpoint != endpoint
+                if !isConflict { webEndpoint = endpoint }
+                lock.unlock()
+                if isConflict {
+                    failReady(DshProcessIOError.endpointConflict)
+                } else {
+                    resolveReadyIfPossible()
+                }
+            } catch let error as DshWebEndpointError {
+                failReady(DshProcessIOError.invalidEndpoint(error.localizedDescription))
+            } catch {
+                failReady(DshProcessIOError.invalidEndpoint("解析失败"))
+            }
             return
         }
 
-        if let match = Self.controlReadyRegex.firstMatch(in: line, range: range),
-           let generationRange = Range(match.range(at: 1), in: line),
-           let generation = UUID(uuidString: String(line[generationRange])) {
+        if let match = Self.controlReadyRegex.firstMatch(in: normalizedLine, range: range),
+           let generationRange = Range(match.range(at: 1), in: normalizedLine),
+           let generation = UUID(uuidString: String(normalizedLine[generationRange])) {
             lock.lock()
             controlReadyGeneration = generation
             lock.unlock()
@@ -237,15 +268,15 @@ public final class DshProcessIO: @unchecked Sendable {
             return
         }
 
-        if let match = Self.policyRegex.firstMatch(in: line, range: range),
-           let generationRange = Range(match.range(at: 1), in: line),
-           let revisionRange = Range(match.range(at: 2), in: line),
-           let enabledRange = Range(match.range(at: 3), in: line),
-           let exposureRange = Range(match.range(at: 4), in: line),
-           let generation = UUID(uuidString: String(line[generationRange])),
-           let revision = Int(line[revisionRange]) {
-            let enabled = String(line[enabledRange]) == "true"
-            guard let exposure = DshNetworkExposure(rawValue: String(line[exposureRange])) else { return }
+        if let match = Self.policyRegex.firstMatch(in: normalizedLine, range: range),
+           let generationRange = Range(match.range(at: 1), in: normalizedLine),
+           let revisionRange = Range(match.range(at: 2), in: normalizedLine),
+           let enabledRange = Range(match.range(at: 3), in: normalizedLine),
+           let exposureRange = Range(match.range(at: 4), in: normalizedLine),
+           let generation = UUID(uuidString: String(normalizedLine[generationRange])),
+           let revision = Int(normalizedLine[revisionRange]) {
+            let enabled = String(normalizedLine[enabledRange]) == "true"
+            guard let exposure = DshNetworkExposure(rawValue: String(normalizedLine[exposureRange])) else { return }
             var continuation: CheckedContinuation<Void, Error>?
             var result: Result<Void, Error> = .success(())
             lock.lock()
@@ -269,7 +300,7 @@ public final class DshProcessIO: @unchecked Sendable {
     private func resolveReadyIfPossible() {
         lock.lock()
         guard !readySettled,
-              let webURL,
+              let webEndpoint,
               controlReadyGeneration == expectedGeneration,
               let continuation = readyContinuation else {
             lock.unlock()
@@ -280,11 +311,11 @@ public final class DshProcessIO: @unchecked Sendable {
         readyTimeoutTask?.cancel()
         readyTimeoutTask = nil
         lock.unlock()
-        continuation.resume(returning: webURL)
+        continuation.resume(returning: webEndpoint)
     }
 
     private func failReady(_ error: Error) {
-        var readyContinuation: CheckedContinuation<URL, Error>?
+        var readyContinuation: CheckedContinuation<DshWebEndpoint, Error>?
         var policyContinuations: [CheckedContinuation<Void, Error>] = []
         lock.lock()
         if terminalError == nil { terminalError = error }
@@ -324,7 +355,7 @@ public final class DshProcessIO: @unchecked Sendable {
 
     private func appendLog(_ line: String) {
         lock.lock()
-        let redacted = redact(line)
+        let redacted = redactor.redact(line)
         ringBuffer.append(contentsOf: Data((redacted + "\n").utf8))
         if ringBuffer.count > Self.maxLogBytes {
             ringBuffer.removeFirst(ringBuffer.count - Self.maxLogBytes)
@@ -332,9 +363,24 @@ public final class DshProcessIO: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func redact(_ text: String) -> String {
-        secrets.reduce(text) { partial, secret in
-            partial.replacingOccurrences(of: secret, with: "[REDACTED]")
+    private func finishPartial(isStdout: Bool) {
+        var line: String?
+        lock.lock()
+        if isStdout, !stdoutPartial.isEmpty {
+            line = stdoutPartial
+            stdoutPartial = ""
+        } else if !isStdout, !stderrPartial.isEmpty {
+            line = stderrPartial
+            stderrPartial = ""
         }
+        if let line {
+            let redacted = redactor.redact(line)
+            ringBuffer.append(contentsOf: Data((redacted + "\n").utf8))
+            if ringBuffer.count > Self.maxLogBytes {
+                ringBuffer.removeFirst(ringBuffer.count - Self.maxLogBytes)
+            }
+        }
+        lock.unlock()
+        if let line { inspect(line) }
     }
 }

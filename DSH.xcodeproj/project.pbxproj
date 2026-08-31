@@ -40,6 +40,10 @@
 		E00000000000000000000030 /* DshProcessIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000053 /* DshProcessIO.swift */; };
 		E00000000000000000000031 /* DshRendererCookieStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000054 /* DshRendererCookieStore.swift */; };
 		E00000000000000000000032 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D00000000000000000000034 /* Security.framework */; };
+		E00000000000000000000033 /* DshWebEndpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000055 /* DshWebEndpoint.swift */; };
+		E00000000000000000000034 /* DshSecretRedactor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000056 /* DshSecretRedactor.swift */; };
+		E00000000000000000000035 /* DshRuntimeHealthClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000057 /* DshRuntimeHealthClient.swift */; };
+		E00000000000000000000036 /* DshUpstreamCookieStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000058 /* DshUpstreamCookieStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -78,6 +82,10 @@
 		D00000000000000000000052 /* DshAccessController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshAccessController.swift; sourceTree = "<group>"; };
 		D00000000000000000000053 /* DshProcessIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshProcessIO.swift; sourceTree = "<group>"; };
 		D00000000000000000000054 /* DshRendererCookieStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshRendererCookieStore.swift; sourceTree = "<group>"; };
+		D00000000000000000000055 /* DshWebEndpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshWebEndpoint.swift; sourceTree = "<group>"; };
+		D00000000000000000000056 /* DshSecretRedactor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshSecretRedactor.swift; sourceTree = "<group>"; };
+		D00000000000000000000057 /* DshRuntimeHealthClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshRuntimeHealthClient.swift; sourceTree = "<group>"; };
+		D00000000000000000000058 /* DshUpstreamCookieStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshUpstreamCookieStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -162,6 +170,9 @@
 				D00000000000000000000016 /* DshService.swift */,
 				D00000000000000000000051 /* DshControlProtocol.swift */,
 				D00000000000000000000052 /* DshAccessController.swift */,
+				D00000000000000000000055 /* DshWebEndpoint.swift */,
+				D00000000000000000000056 /* DshSecretRedactor.swift */,
+				D00000000000000000000057 /* DshRuntimeHealthClient.swift */,
 				D00000000000000000000053 /* DshProcessIO.swift */,
 			);
 			path = Service;
@@ -214,6 +225,7 @@
 				D00000000000000000000022 /* MainWindowController.swift */,
 				D00000000000000000000050 /* DshWebShell.swift */,
 				D00000000000000000000054 /* DshRendererCookieStore.swift */,
+				D00000000000000000000058 /* DshUpstreamCookieStore.swift */,
 			);
 			path = MainWindow;
 			sourceTree = "<group>";
@@ -369,8 +381,12 @@
 				E00000000000000000000027 /* DshWebShell.swift in Sources */,
 				E00000000000000000000028 /* DshControlProtocol.swift in Sources */,
 				E00000000000000000000029 /* DshAccessController.swift in Sources */,
+				E00000000000000000000033 /* DshWebEndpoint.swift in Sources */,
+				E00000000000000000000034 /* DshSecretRedactor.swift in Sources */,
+				E00000000000000000000035 /* DshRuntimeHealthClient.swift in Sources */,
 				E00000000000000000000030 /* DshProcessIO.swift in Sources */,
 				E00000000000000000000031 /* DshRendererCookieStore.swift in Sources */,
+				E00000000000000000000036 /* DshUpstreamCookieStore.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

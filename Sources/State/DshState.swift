@@ -14,6 +14,29 @@ public enum DshRuntimeChannel: String, Codable, Sendable {
     case latest
     case next
     case alpha
+
+    /// Resolve the release channel represented by an installed Runtime
+    /// version. This is deliberately independent from the user's pending
+    /// update-channel setting: changing that setting must not rewrite the
+    /// channel shown for the Runtime that is already running.
+    public static func inferred(from version: String) -> DshRuntimeChannel {
+        guard let prerelease = version
+            .split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            .dropFirst()
+            .first,
+            let identifier = prerelease.split(separator: ".").first else {
+            return .latest
+        }
+
+        switch identifier {
+        case "alpha":
+            return .alpha
+        case "rc":
+            return .next
+        default:
+            return .latest
+        }
+    }
 }
 
 /// The DSH profile used by the desktop app. The isolated desktop profile is

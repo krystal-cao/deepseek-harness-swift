@@ -24,6 +24,11 @@ public struct VersionsTabView: View {
         viewModel.runtimeChannel.rawValue
     }
 
+    private var activeChannelName: String {
+        guard let currentVersion else { return "未安装" }
+        return DshRuntimeChannel.inferred(from: currentVersion).rawValue
+    }
+
     private var channelDescription: String {
         switch viewModel.runtimeChannel {
         case .latest:
@@ -73,7 +78,7 @@ public struct VersionsTabView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(currentVersion ?? "未安装")
                             .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                        Text("来源：npm Registry · 通道：\(channelName)")
+                        Text("来源：npm Registry · 通道：\(activeChannelName)")
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }

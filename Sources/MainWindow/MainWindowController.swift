@@ -107,6 +107,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var vibrancyView: NSVisualEffectView?
     private var webShell: DshWebShell?
     private var rendererCookieStore: DshRendererCookieStore?
+    private var upstreamCookieStore: DshUpstreamCookieStore?
     private var serviceSession: DshServiceSession?
     private var onboardingHostingView: NSView?
     private var webUIReadinessGeneration = 0
@@ -120,10 +121,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
     private var downloadStatusBanner: DownloadStatusBanner?
     private let runtimeOperationGate = DshAsyncOperationGate()
+    private let runtimeHealthClient = DshRuntimeHealthClient()
 
     private enum RuntimeHealthError: LocalizedError {
         case nonHTTPResponse(String)
         case unexpectedStatus(label: String, expected: String, actual: Int)
+        case invalidPage
         case malformedBrowserURL
         case malformedLANURL
 
@@ -133,6 +136,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                 return "\(label) 没有返回有效的 HTTP 响应。"
             case .unexpectedStatus(let label, let expected, let actual):
                 return "\(label) 健康检查失败：期望 \(expected)，实际 HTTP \(actual)。"
+            case .invalidPage:
+                return "Renderer 页面健康检查失败：返回内容不是有效的 HTML 页面。"
             case .malformedBrowserURL:
                 return "Browser 访问边界检查失败：Host 返回了无效的 loopback URL。"
             case .malformedLANURL:
@@ -202,6 +207,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         self.webShell = shell
         self.webView = shell.webView
         self.rendererCookieStore = DshRendererCookieStore(dataStore: shell.webView.configuration.websiteDataStore)
+        self.upstreamCookieStore = DshUpstreamCookieStore(dataStore: shell.webView.configuration.websiteDataStore)
         self.vibrancyView = shell.rootView
         win.contentView = shell.rootView
     }
@@ -225,7 +231,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             do {
                 _ = try await withRuntimeOperation {
                     let session = try await self.restartDshServiceDuringOperation()
-                    print("[MainWindowController] DSH service ready at \(session.url)")
+                    print("[MainWindowController] DSH service ready at \(session.originURL)")
                     await SettingsViewModel.shared.recordHealthyRuntimeStart()
                     await SettingsViewModel.shared.finalizeRecoveredRuntimeAfterSuccessfulStart()
                     return session
@@ -298,13 +304,16 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         // where DSH briefly listened through the unprotected upstream server.
         try DshPluginManager.shared.bootstrapWebProfileManifestIfMissing()
         _ = try await DshPluginManager.shared.ensureDesktopHostPlugin()
+        _ = try await DshPluginManager.shared.repairProfileDependenciesIfNeeded()
         serviceSession = nil
         let session = try await DshService.shared.start()
+        guard let rendererCookieStore, let upstreamCookieStore else {
+            DshService.shared.stop()
+            throw DshRendererCookieStore.CookieError.writeFailed
+        }
 
         do {
-            guard let rendererCookieStore else {
-                throw DshRendererCookieStore.CookieError.writeFailed
-            }
+            try await upstreamCookieStore.prepareForNewSession(for: session)
             try await rendererCookieStore.install(for: session)
         } catch {
             // A service without its current Renderer credential must never be
@@ -316,19 +325,40 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         serviceSession = session
         webUIReadinessGeneration &+= 1
         pendingWebUINavigation = nil
-        guard let navigation = self.webView?.load(URLRequest(url: session.url)) else {
+        let firstNavigationURL = session.endpoint.bootstrapURL ?? session.originURL
+        // Install the continuation before calling load. A fast local page can
+        // finish its redirect before the next suspension point otherwise.
+        let webUIReadyTask = Task { @MainActor in
+            try await self.waitForWebUIReady()
+        }
+        await Task.yield()
+        guard let navigation = self.webView?.load(URLRequest(url: firstNavigationURL)) else {
+            let error = NSError(
+                domain: "DshWebUI",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "无法加载 DSH 页面"]
+            )
+            completeWebUIReadiness(.failure(error))
             DshService.shared.stop()
-            throw NSError(domain: "DshWebUI", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法加载 DSH 页面"])
+            throw error
         }
         pendingWebUINavigation = navigation
         do {
-            try await waitForWebUIReady()
-            try await verifyRuntimeHealth(session: session)
+            try await webUIReadyTask.value
+            let upstreamCookies = try await upstreamCookieStore.waitForAuthenticatedCookies(for: session)
+            let authenticatedSession = DshServiceSession(
+                endpoint: session.endpoint.withoutBootstrap(),
+                access: session.access
+            )
+            // Do not retain the bearer-bearing bootstrap URL after WebKit has
+            // exchanged it for the HttpOnly upstream cookie.
+            serviceSession = authenticatedSession
+            try await verifyRuntimeHealth(session: authenticatedSession, upstreamCookies: upstreamCookies)
+            return authenticatedSession
         } catch {
             DshService.shared.stop()
             throw error
         }
-        return session
     }
 
     /// Verify the parts of the runtime contract that are stable in the
@@ -340,13 +370,23 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     /// such as workspace.list; that optional capability is therefore not
     /// invented here. When upstream exposes one, it can be added as another
     /// capability-specific probe without weakening these mandatory checks.
-    private func verifyRuntimeHealth(session: DshServiceSession) async throws {
+    private func verifyRuntimeHealth(
+        session: DshServiceSession,
+        upstreamCookies: [HTTPCookie]
+    ) async throws {
         let rendererRequest = runtimeHealthRequest(
-            url: session.url,
-            method: "GET",
-            rendererToken: session.access.rendererToken
+            url: session.originURL,
+            method: "GET"
         )
-        let rendererResponse = try await runtimeHealthResponse(for: rendererRequest, label: "Renderer 页面")
+        let rendererResponse = try await runtimeHealthResponse(
+            for: rendererRequest,
+            label: "Renderer 页面",
+            credentials: healthCredentials(
+                rendererToken: session.access.rendererToken,
+                upstreamCookies: upstreamCookies
+            ),
+            requireCleanFinalURL: true
+        )
         guard (200...299).contains(rendererResponse.statusCode) else {
             throw RuntimeHealthError.unexpectedStatus(
                 label: "Renderer 页面",
@@ -354,9 +394,17 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                 actual: rendererResponse.statusCode
             )
         }
+        guard DshRuntimeHealthClient.isHTMLPage(rendererResponse) else {
+            throw RuntimeHealthError.invalidPage
+        }
 
-        let anonymousRequest = runtimeHealthRequest(url: session.url)
-        let anonymousResponse = try await runtimeHealthResponse(for: anonymousRequest, label: "匿名 loopback")
+        let anonymousRequest = runtimeHealthRequest(url: session.originURL)
+        let anonymousResponse = try await runtimeHealthResponse(
+            for: anonymousRequest,
+            label: "匿名 loopback",
+            credentials: .anonymous,
+            requireCleanFinalURL: true
+        )
         guard anonymousResponse.statusCode == 403 else {
             throw RuntimeHealthError.unexpectedStatus(
                 label: "匿名 loopback",
@@ -372,14 +420,17 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     }
 
     private func verifyBrowserAccessBoundary(session: DshServiceSession) async throws {
-        let routeURL = session.url.appendingPathComponent("__dsh_swift/browser-url")
+        let routeURL = session.originURL.appendingPathComponent("__dsh_swift/browser-url")
         var request = runtimeHealthRequest(
             url: routeURL,
-            method: "POST",
-            rendererToken: session.access.rendererToken
+            method: "POST"
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let response = try await runtimeHealthResponse(for: request, label: "Browser URL 路由")
+        let response = try await runtimeHealthResponse(
+            for: request,
+            label: "Browser URL 路由",
+            credentials: healthCredentials(rendererToken: session.access.rendererToken)
+        )
         let browserEnabled = DshStateManager.shared.current.browserAccessEnabled
 
         guard browserEnabled else {
@@ -406,32 +457,67 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         guard let payload = try? JSONDecoder().decode(BrowserURLResponse.self, from: response.body),
               payload.url.scheme == "http",
               payload.url.host == "127.0.0.1",
-              payload.url.port == session.url.port else {
+              payload.url.port == session.originURL.port,
+              isBrowserHandoffURL(payload.url) else {
             throw RuntimeHealthError.malformedBrowserURL
         }
 
+        guard let handoff = browserHandoffCredentials(from: payload.url) else {
+            throw RuntimeHealthError.malformedBrowserURL
+        }
         let browserPageResponse = try await runtimeHealthResponse(
             for: runtimeHealthRequest(url: payload.url),
-            label: "Browser 鉴权页面"
+            label: "Browser 鉴权页面",
+            credentials: DshRuntimeHealthCredentials(cookieHeader: "dsh_browser_auth=\(handoff.browserToken)"),
+            requireCleanFinalURL: true,
+            requireCleanRedirectTargets: false,
+            maxRedirects: 2
         )
-        guard (200...299).contains(browserPageResponse.statusCode) else {
+        if (200...299).contains(browserPageResponse.statusCode) {
+            guard DshRuntimeHealthClient.isHTMLPage(browserPageResponse) else {
+                throw RuntimeHealthError.invalidPage
+            }
+            return
+        }
+
+        guard browserPageResponse.statusCode == 401,
+              let expectedCookieName = try? DshUpstreamCookieStore.expectedCookieName(for: session),
+              let upstreamCookie = upstreamCookiePair(from: browserPageResponse, expectedName: expectedCookieName) else {
             throw RuntimeHealthError.unexpectedStatus(
                 label: "Browser 鉴权页面",
                 expected: "2xx",
                 actual: browserPageResponse.statusCode
             )
         }
+        let authenticatedPage = try await runtimeHealthResponse(
+            for: runtimeHealthRequest(url: session.originURL),
+            label: "Browser 上游 Cookie 页面",
+            credentials: DshRuntimeHealthCredentials(cookieHeader: "dsh_browser_auth=\(handoff.browserToken); \(upstreamCookie)"),
+            requireCleanFinalURL: true,
+            maxRedirects: 0
+        )
+        guard (200...299).contains(authenticatedPage.statusCode),
+              DshRuntimeHealthClient.isHTMLPage(authenticatedPage) else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "Browser 上游 Cookie 页面",
+                expected: "2xx HTML",
+                actual: authenticatedPage.statusCode
+            )
+        }
     }
 
     private func verifyLANAccessBoundary(session: DshServiceSession) async throws {
-        let routeURL = session.url.appendingPathComponent("__dsh_swift/lan-url")
+        let routeURL = session.originURL.appendingPathComponent("__dsh_swift/lan-url")
         var request = runtimeHealthRequest(
             url: routeURL,
-            method: "POST",
-            rendererToken: session.access.rendererToken
+            method: "POST"
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let response = try await runtimeHealthResponse(for: request, label: "LAN URL 路由")
+        let response = try await runtimeHealthResponse(
+            for: request,
+            label: "LAN URL 路由",
+            credentials: healthCredentials(rendererToken: session.access.rendererToken)
+        )
         guard response.statusCode == 200 else {
             throw RuntimeHealthError.unexpectedStatus(
                 label: "开启状态的 LAN URL 路由",
@@ -451,37 +537,89 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
               payload.url.port != nil else {
             throw RuntimeHealthError.malformedLANURL
         }
+
+        let lanPageResponse = try await runtimeHealthResponse(
+            for: runtimeHealthRequest(url: payload.url),
+            label: "LAN 实际入口",
+            credentials: .anonymous,
+            maxRedirects: 0
+        )
+        guard (200...299).contains(lanPageResponse.statusCode),
+              DshRuntimeHealthClient.isHTMLPage(lanPageResponse) else {
+            throw RuntimeHealthError.unexpectedStatus(
+                label: "LAN 实际入口",
+                expected: "2xx HTML",
+                actual: lanPageResponse.statusCode
+            )
+        }
     }
 
     private func runtimeHealthRequest(
         url: URL,
-        method: String = "GET",
-        rendererToken: String? = nil
+        method: String = "GET"
     ) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("application/json, text/html;q=0.9, */*;q=0.1", forHTTPHeaderField: "Accept")
-        if let rendererToken {
-            request.setValue("dsh_swift_renderer=\(rendererToken)", forHTTPHeaderField: "Cookie")
-        }
         return request
+    }
+
+    private func healthCredentials(
+        rendererToken: String? = nil,
+        upstreamCookies: [HTTPCookie] = []
+    ) -> DshRuntimeHealthCredentials {
+        var fields: [String] = []
+        if let rendererToken {
+            fields.append("dsh_swift_renderer=\(rendererToken)")
+        }
+        fields.append(contentsOf: upstreamCookies.map { "\($0.name)=\($0.value)" })
+        return DshRuntimeHealthCredentials(cookieHeader: fields.isEmpty ? nil : fields.joined(separator: "; "))
     }
 
     private func runtimeHealthResponse(
         for request: URLRequest,
-        label: String
-    ) async throws -> (statusCode: Int, body: Data) {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
-        let (body, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw RuntimeHealthError.nonHTTPResponse(label)
+        label: String,
+        credentials: DshRuntimeHealthCredentials,
+        requireCleanFinalURL: Bool = false,
+        requireCleanRedirectTargets: Bool? = nil,
+        maxRedirects: Int = 3
+    ) async throws -> DshRuntimeHealthResponse {
+        return try await runtimeHealthClient.perform(
+            request: request,
+            credentials: credentials,
+            label: label,
+            requireCleanFinalURL: requireCleanFinalURL,
+            requireCleanRedirectTargets: requireCleanRedirectTargets,
+            maxRedirects: maxRedirects
+        )
+    }
+
+    private func isBrowserHandoffURL(_ url: URL) -> Bool {
+        guard url.path == "/__dsh_swift/browser-handoff" else { return false }
+        let allowed = Set(["dsh-auth", "dsh-browser-ticket"])
+        let names = Set(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.map(\.name) ?? [])
+        return names == allowed
+    }
+
+    private func browserHandoffCredentials(from url: URL) -> (browserToken: String, ticket: String)? {
+        guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else { return nil }
+        let browserValues = items.filter { $0.name == "dsh-auth" }.compactMap(\.value)
+        let ticketValues = items.filter { $0.name == "dsh-browser-ticket" }.compactMap(\.value)
+        guard browserValues.count == 1, ticketValues.count == 1,
+              !browserValues[0].isEmpty, !ticketValues[0].isEmpty else { return nil }
+        return (browserValues[0], ticketValues[0])
+    }
+
+    private func upstreamCookiePair(from response: DshRuntimeHealthResponse, expectedName: String) -> String? {
+        let pairs = response.setCookieHeaders.compactMap { header -> String? in
+            let pair = header.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? ""
+            guard let separator = pair.firstIndex(of: "="),
+                  String(pair[..<separator]) == expectedName,
+                  pair[separator...].count > 1 else { return nil }
+            return pair
         }
-        return (httpResponse.statusCode, body)
+        return pairs.count == 1 ? pairs[0] : nil
     }
 
     public enum BrowserURLError: Error, LocalizedError {
@@ -518,33 +656,36 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             throw BrowserURLError.serviceUnavailable
         }
 
-        var request = URLRequest(url: session.url.appendingPathComponent("__dsh_swift/browser-url"))
+        var request = URLRequest(url: session.originURL.appendingPathComponent("__dsh_swift/browser-url"))
         request.httpMethod = "POST"
         request.setValue("dsh_swift_renderer=\(session.access.rendererToken)", forHTTPHeaderField: "Cookie")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        let urlSession = URLSession(configuration: configuration)
-        defer { urlSession.invalidateAndCancel() }
-
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
+        let response: DshRuntimeHealthResponse
+        do {
+            response = try await runtimeHealthClient.perform(
+                request: request,
+                credentials: healthCredentials(rendererToken: session.access.rendererToken),
+                label: "Browser URL 签发",
+                maxRedirects: 0
+            )
+        } catch {
             throw BrowserURLError.invalidResponse
         }
-        guard httpResponse.statusCode == 200 else {
-            throw BrowserURLError.requestFailed(httpResponse.statusCode)
+        guard response.statusCode == 200 else {
+            throw BrowserURLError.requestFailed(response.statusCode)
         }
 
         struct BrowserURLResponse: Decodable {
             let url: URL
         }
-        guard let payload = try? JSONDecoder().decode(BrowserURLResponse.self, from: data),
+        guard let payload = try? JSONDecoder().decode(BrowserURLResponse.self, from: response.body),
               payload.url.scheme == "http",
               payload.url.host == "127.0.0.1",
-              payload.url.port == session.url.port else {
+              payload.url.port == session.originURL.port,
+              isBrowserHandoffURL(payload.url),
+              browserHandoffCredentials(from: payload.url) != nil else {
             throw BrowserURLError.invalidResponse
         }
         return payload.url
@@ -582,30 +723,31 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         guard state.networkExposure == .lan else { throw LANURLError.networkAccessDisabled }
         guard let session = serviceSession else { throw LANURLError.serviceUnavailable }
 
-        var request = URLRequest(url: session.url.appendingPathComponent("__dsh_swift/lan-url"))
+        var request = URLRequest(url: session.originURL.appendingPathComponent("__dsh_swift/lan-url"))
         request.httpMethod = "POST"
         request.setValue("dsh_swift_renderer=\(session.access.rendererToken)", forHTTPHeaderField: "Cookie")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
 
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpShouldSetCookies = false
-        configuration.httpCookieStorage = nil
-        let urlSession = URLSession(configuration: configuration)
-        defer { urlSession.invalidateAndCancel() }
-
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
+        let response: DshRuntimeHealthResponse
+        do {
+            response = try await runtimeHealthClient.perform(
+                request: request,
+                credentials: healthCredentials(rendererToken: session.access.rendererToken),
+                label: "LAN URL 签发",
+                maxRedirects: 0
+            )
+        } catch {
             throw LANURLError.invalidResponse
         }
-        guard httpResponse.statusCode == 200 else {
-            throw LANURLError.requestFailed(httpResponse.statusCode)
+        guard response.statusCode == 200 else {
+            throw LANURLError.requestFailed(response.statusCode)
         }
 
         struct LANURLResponse: Decodable {
             let url: URL
         }
-        guard let payload = try? JSONDecoder().decode(LANURLResponse.self, from: data),
+        guard let payload = try? JSONDecoder().decode(LANURLResponse.self, from: response.body),
               payload.url.scheme == "http",
               let host = payload.url.host,
               !host.isEmpty,
@@ -802,6 +944,13 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         url.host == "127.0.0.1" || url.host == "localhost"
     }
 
+    private func isCurrentRuntimeWebURL(_ url: URL) -> Bool {
+        guard let origin = serviceSession?.originURL else { return false }
+        return url.scheme == origin.scheme
+            && url.host == origin.host
+            && url.port == origin.port
+    }
+
     private func isExpectedNavigationInterruption(_ error: Error) -> Bool {
         let error = error as NSError
         if error.domain == NSURLErrorDomain && error.code == NSURLErrorCancelled {
@@ -819,10 +968,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             return
         }
 
-        if isLocalWebURL(url) && navigationAction.shouldPerformDownload {
+        if isCurrentRuntimeWebURL(url) && navigationAction.shouldPerformDownload {
             decisionHandler(.download)
-        } else if isLocalWebURL(url) {
+        } else if isCurrentRuntimeWebURL(url) {
             decisionHandler(.allow)
+        } else if isLocalWebURL(url) {
+            // A loopback URL is not automatically trusted: localhost and a
+            // different port are different authorities for BrowserAuth.
+            decisionHandler(.cancel)
         } else {
             if navigationAction.navigationType == .linkActivated {
                 NSWorkspace.shared.open(url)
@@ -834,7 +987,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     public func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                         decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         guard let url = navigationResponse.response.url,
-              isLocalWebURL(url) else {
+              isCurrentRuntimeWebURL(url) else {
             decisionHandler(.cancel)
             return
         }
@@ -1047,7 +1200,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                         for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if let url = navigationAction.request.url {
-            NSWorkspace.shared.open(url)
+            if !isCurrentRuntimeWebURL(url) {
+                NSWorkspace.shared.open(url)
+            }
         }
         return nil
     }

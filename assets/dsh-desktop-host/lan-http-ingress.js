@@ -10,8 +10,10 @@ import {
   browserCredentialForLan,
   hasValidLanCredential,
 } from "./access-state.js";
+import { createUpstreamSessionBroker } from "./upstream-session-broker.js";
 
 const BROWSER_AUTH_PARAMETER = "dsh-auth";
+const UPSTREAM_TOKEN_PARAMETER = "token";
 const BACKEND_HOST = "127.0.0.1";
 const FORBIDDEN_BODY = "forbidden";
 const BAD_GATEWAY_BODY = "bad gateway";
@@ -55,20 +57,29 @@ function publicAuthority(request) {
   try {
     const parsed = new URL(`http://${hostHeader}`);
     if (!parsed.hostname || parsed.port === "") return undefined;
-    return { hostname: parsed.hostname, port: Number(parsed.port), text: hostHeader };
+    const port = Number(parsed.port);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) return undefined;
+    return { hostname: parsed.hostname, port, text: parsed.host };
   } catch {
     return undefined;
   }
 }
 
-function requestPath(request) {
+function isSensitiveQueryKey(key) {
+  const normalized = key.toLowerCase();
+  return normalized === BROWSER_AUTH_PARAMETER || normalized === UPSTREAM_TOKEN_PARAMETER || normalized.startsWith("dsh-auth-");
+}
+
+export function requestPath(request) {
   let url;
   try {
     url = new URL(request.url ?? "/", `http://${request.headers.host}`);
   } catch {
     return undefined;
   }
-  url.searchParams.delete(BROWSER_AUTH_PARAMETER);
+  for (const key of [...url.searchParams.keys()]) {
+    if (isSensitiveQueryKey(key) || key.startsWith("dsh-desktop-") || key.startsWith("dsh-swift-")) url.searchParams.delete(key);
+  }
   return `${url.pathname || "/"}${url.search ? url.search : ""}`;
 }
 
@@ -88,43 +99,94 @@ function requestAllowed(request, state, listenPort, addressProvider) {
   return true;
 }
 
-function sanitizedCookies(request, browserToken) {
+function deleteHeader(headers, name) {
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === name.toLowerCase()) delete headers[key];
+  }
+}
+
+function cookieName(value) {
+  const separator = value.indexOf("=");
+  return separator === -1 ? "" : value.slice(0, separator).trim().toLowerCase();
+}
+
+function sensitiveCookieName(name) {
+  return name === RENDERER_COOKIE_NAME || name === BROWSER_COOKIE_NAME || name === LAN_COOKIE_NAME || name.startsWith("dsh-auth-");
+}
+
+export function sanitizedCookies(request, browserToken, upstreamCookie) {
   const values = [];
   if (typeof request.headers?.cookie === "string") {
     for (const part of request.headers.cookie.split(";")) {
-      const separator = part.indexOf("=");
-      if (separator === -1) continue;
-      const name = part.slice(0, separator).trim();
-      if (name === RENDERER_COOKIE_NAME || name === BROWSER_COOKIE_NAME || name === LAN_COOKIE_NAME) continue;
-      values.push(part.trim());
+      const trimmed = part.trim();
+      if (!trimmed || sensitiveCookieName(cookieName(trimmed))) continue;
+      values.push(trimmed);
     }
   }
   values.push(`${BROWSER_COOKIE_NAME}=${browserToken}`);
+  if (typeof upstreamCookie === "string") values.push(upstreamCookie);
   return values.join("; ");
 }
 
-function backendHeaders(request, browserToken, backendPort) {
+export function backendHeaders(request, browserToken, upstreamCookie, backendPort) {
   const headers = { ...request.headers };
-  delete headers.host;
-  delete headers.origin;
-  delete headers["sec-fetch-site"];
-  delete headers["x-forwarded-for"];
-  delete headers["x-forwarded-host"];
+  for (const name of [
+    "host",
+    "origin",
+    "sec-fetch-site",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "authorization",
+    ...HOP_BY_HOP_HEADERS,
+  ]) deleteHeader(headers, name);
   headers.host = `${BACKEND_HOST}:${String(backendPort)}`;
-  headers.cookie = sanitizedCookies(request, browserToken);
+  headers.cookie = sanitizedCookies(request, browserToken, upstreamCookie);
   return headers;
 }
 
-function responseHeaders(headers, request) {
+function hasSensitiveQuery(url) {
+  for (const key of url.searchParams.keys()) if (isSensitiveQueryKey(key)) return true;
+  return false;
+}
+
+function filteredSetCookies(value) {
+  const cookies = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  return cookies.filter((cookie) => !sensitiveCookieName(cookieName(String(cookie))));
+}
+
+function safeLocation(value, request) {
+  if (typeof value !== "string") return undefined;
+  const authority = publicAuthority(request);
+  const backendOrigin = `http://${BACKEND_HOST}:${String(request.backendPort)}`;
+  let location;
+  try {
+    location = new URL(value, backendOrigin);
+  } catch {
+    return undefined;
+  }
+  if (hasSensitiveQuery(location)) return undefined;
+  if (location.origin === backendOrigin && authority) {
+    return `http://${authority.text}${location.pathname || "/"}${location.search}${location.hash}`;
+  }
+  return value;
+}
+
+export function responseHeaders(headers, request) {
   const output = {};
   for (const [name, value] of Object.entries(headers)) {
-    if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) output[name] = value;
-  }
-  const location = output.location;
-  if (typeof location === "string") {
-    const authority = publicAuthority(request);
-    const backendOrigin = `http://${BACKEND_HOST}:${String(request.backendPort)}`;
-    if (authority) output.location = location.replace(backendOrigin, `http://${authority.text}`);
+    const normalized = name.toLowerCase();
+    if (HOP_BY_HOP_HEADERS.has(normalized)) continue;
+    if (normalized === "set-cookie") {
+      const cookies = filteredSetCookies(value);
+      if (cookies.length > 0) output["set-cookie"] = cookies;
+      continue;
+    }
+    if (normalized === "location") {
+      const location = safeLocation(typeof value === "string" ? value : value?.[0], request);
+      if (location !== undefined) output.location = location;
+      continue;
+    }
+    output[name] = value;
   }
   return output;
 }
@@ -162,87 +224,125 @@ function badGateway(response) {
   response.end(BAD_GATEWAY_BODY);
 }
 
-function appendSessionCookie(headers, lanCredential, request) {
-  const existing = headers["set-cookie"] ?? headers["Set-Cookie"];
-  const cookies = (Array.isArray(existing) ? existing : existing ? [existing] : [])
-    .filter((cookie) => !String(cookie).startsWith(`${BROWSER_COOKIE_NAME}=`) && !String(cookie).startsWith(`${LAN_COOKIE_NAME}=`));
+export function appendSessionCookie(headers, lanCredential, request) {
+  const cookies = filteredSetCookies(headers["set-cookie"] ?? headers["Set-Cookie"]);
   cookies.push(`${LAN_COOKIE_NAME}=${lanCredential}; Path=/; Max-Age=600; HttpOnly; SameSite=Strict`);
   headers["set-cookie"] = cookies;
-  if (new URL(request.url ?? "/", "http://127.0.0.1").searchParams.has(BROWSER_AUTH_PARAMETER)) {
-    headers["referrer-policy"] = "no-referrer";
+  let url;
+  try {
+    url = new URL(request.url ?? "/", "http://127.0.0.1");
+  } catch {
+    return;
   }
+  if (hasSensitiveQuery(url)) headers["referrer-policy"] = "no-referrer";
 }
 
-export function createLanHTTPIngress({ backendPort, state, listenHost = "0.0.0.0", listenPort = 0, addressProvider = getLanIPv4Addresses }) {
+async function exchangeCredential(broker, credential) {
+  return broker.cookiesFor(credential.browserToken, credential.lanCredential);
+}
+
+export function createLanHTTPIngress({ backendPort, state, getConnection = () => undefined, listenHost = "0.0.0.0", listenPort = 0, addressProvider = getLanIPv4Addresses }) {
   let server;
   let actualPort = 0;
   const sockets = new Set();
+  const broker = createUpstreamSessionBroker({ state, backendPort, getConnection });
+  state.attachSessionBroker?.(broker);
 
   const ingress = {
     async start() {
       if (server) return;
       server = http.createServer((request, response) => {
-        const credential = browserCredentialForLan(request, state);
-        if (!requestAllowed(request, state, actualPort, addressProvider) || !credential) {
-          forbidden(response);
-          return;
-        }
+        void (async () => {
+          if (!requestAllowed(request, state, actualPort, addressProvider)) {
+            forbidden(response);
+            return;
+          }
+          const credential = browserCredentialForLan(request, state);
+          if (!credential) {
+            forbidden(response);
+            return;
+          }
+          const path = requestPath(request);
+          if (!path) {
+            forbidden(response);
+            return;
+          }
 
-        const path = requestPath(request);
-        if (!path) {
-          forbidden(response);
-          return;
-        }
-        const headers = backendHeaders(request, credential.browserToken, backendPort);
-        const proxyRequest = http.request({
-          host: BACKEND_HOST,
-          port: backendPort,
-          method: request.method,
-          path,
-          headers,
-        }, (proxyResponse) => {
-          const outputHeaders = responseHeaders(proxyResponse.headers, { ...request, backendPort });
-          appendSessionCookie(outputHeaders, credential.lanCredential, request);
-          response.writeHead(proxyResponse.statusCode ?? 502, outputHeaders);
-          proxyResponse.pipe(response);
-        });
-        proxyRequest.once("error", () => badGateway(response));
-        request.pipe(proxyRequest);
+          let session;
+          try {
+            session = await exchangeCredential(broker, credential);
+          } catch {
+            badGateway(response);
+            return;
+          }
+          const headers = backendHeaders(request, credential.browserToken, session.upstreamCookie, backendPort);
+          const proxyRequest = http.request({
+            host: BACKEND_HOST,
+            port: backendPort,
+            method: request.method,
+            path,
+            headers,
+          }, (proxyResponse) => {
+            const outputHeaders = responseHeaders(proxyResponse.headers, { ...request, backendPort });
+            appendSessionCookie(outputHeaders, credential.lanCredential, request);
+            response.writeHead(proxyResponse.statusCode ?? 502, outputHeaders);
+            proxyResponse.pipe(response);
+          });
+          proxyRequest.once("error", () => badGateway(response));
+          request.once("aborted", () => proxyRequest.destroy());
+          request.pipe(proxyRequest);
+        })().catch(() => badGateway(response));
       });
       server.on("connection", (socket) => {
         sockets.add(socket);
+        broker.trackSocket(socket);
         socket.once("close", () => sockets.delete(socket));
       });
       server.on("upgrade", (request, socket, head) => {
-        const credential = browserCredentialForLan(request, state);
-        const path = requestPath(request);
-        if (!requestAllowed(request, state, actualPort, addressProvider) || !credential || !path) {
-          forbiddenSocket(socket);
-          return;
-        }
-
-        const backendSocket = net.connect(backendPort, BACKEND_HOST);
-        sockets.add(backendSocket);
-        backendSocket.once("close", () => sockets.delete(backendSocket));
-        backendSocket.once("connect", () => {
-          const headers = backendHeaders(request, credential.browserToken, backendPort);
-          headers.connection = "Upgrade";
-          headers.upgrade = request.headers.upgrade ?? "websocket";
-          const lines = [`${request.method ?? "GET"} ${path} HTTP/1.1`];
-          for (const [name, value] of Object.entries(headers)) {
-            if (Array.isArray(value)) {
-              for (const item of value) lines.push(`${name}: ${item}`);
-            } else if (value !== undefined) {
-              lines.push(`${name}: ${value}`);
-            }
+        void (async () => {
+          const path = requestPath(request);
+          if (!requestAllowed(request, state, actualPort, addressProvider) || !path) {
+            forbiddenSocket(socket);
+            return;
           }
-          backendSocket.write(`${lines.join("\r\n")}\r\n\r\n`);
-          if (head?.length) backendSocket.write(head);
-          socket.pipe(backendSocket).pipe(socket);
-        });
-        backendSocket.once("error", () => {
-          if (!socket.destroyed) forbiddenSocket(socket);
-        });
+          const credential = browserCredentialForLan(request, state);
+          if (!credential) {
+            forbiddenSocket(socket);
+            return;
+          }
+          let session;
+          try {
+            session = await exchangeCredential(broker, credential);
+          } catch {
+            forbiddenSocket(socket);
+            return;
+          }
+
+          const backendSocket = net.connect(backendPort, BACKEND_HOST);
+          sockets.add(backendSocket);
+          broker.trackSocket(socket, credential.browserToken);
+          broker.trackSocket(backendSocket, credential.browserToken);
+          backendSocket.once("close", () => sockets.delete(backendSocket));
+          backendSocket.once("connect", () => {
+            const headers = backendHeaders(request, credential.browserToken, session.upstreamCookie, backendPort);
+            headers.connection = "Upgrade";
+            headers.upgrade = request.headers.upgrade ?? "websocket";
+            const lines = [`${request.method ?? "GET"} ${path} HTTP/1.1`];
+            for (const [name, value] of Object.entries(headers)) {
+              if (Array.isArray(value)) {
+                for (const item of value) lines.push(`${name}: ${item}`);
+              } else if (value !== undefined) {
+                lines.push(`${name}: ${value}`);
+              }
+            }
+            backendSocket.write(`${lines.join("\r\n")}\r\n\r\n`);
+            if (head?.length) backendSocket.write(head);
+            socket.pipe(backendSocket).pipe(socket);
+          });
+          backendSocket.once("error", () => {
+            if (!socket.destroyed) forbiddenSocket(socket);
+          });
+        })().catch(() => forbiddenSocket(socket));
       });
       server.on("connect", (_request, socket) => socket.end());
 
@@ -265,6 +365,8 @@ export function createLanHTTPIngress({ backendPort, state, listenHost = "0.0.0.0
     },
 
     async stop() {
+      broker.clear();
+      state.detachSessionBroker?.(broker);
       if (!server) return;
       const current = server;
       server = undefined;
@@ -279,11 +381,15 @@ export function createLanHTTPIngress({ backendPort, state, listenHost = "0.0.0.0
     },
 
     addresses() {
-      return getLanIPv4Addresses();
+      return addressProvider();
     },
 
     isRunning() {
       return server !== undefined && actualPort > 0;
+    },
+
+    broker() {
+      return broker;
     },
   };
 

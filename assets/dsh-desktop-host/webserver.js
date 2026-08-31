@@ -3,13 +3,12 @@ import UpstreamWebServer from "@deepseek-ai/dsh-host-webserver";
 import {
   CLASSIFICATIONS,
   accessState,
-  browserCredentialFromURL,
   decideRequest,
   hasReservedDesktopParameter,
   requestPassesLoopbackFence,
 } from "./access-state.js";
 import { markDesktopServerReady, startDesktopControl } from "./control.js";
-import { createBrowserURLRoute } from "./browser-url-route.js";
+import { captureConnection, createBrowserHandoffRoute, createBrowserURLRoute } from "./browser-url-route.js";
 import { createLanHTTPIngress } from "./lan-http-ingress.js";
 import { NETWORK_EXPOSURES } from "./access-state.js";
 import { createLanURLRoute } from "./lan-url-route.js";
@@ -58,19 +57,6 @@ function requestAllowed(request, classification, state) {
   return true;
 }
 
-function attachBrowserSessionCookie(request, response, classification) {
-  if (classification !== CLASSIFICATIONS.browser || response.headersSent) return;
-  const token = browserCredentialFromURL(request, accessState);
-  if (token === undefined) return;
-  // The short-lived credential is present in the first navigation URL. Do not
-  // let that URL become a Referer for any external link opened by the DSH UI.
-  response.setHeader("referrer-policy", "no-referrer");
-  response.setHeader(
-    "set-cookie",
-    `dsh_browser_auth=${token}; Path=/; Max-Age=600; HttpOnly; SameSite=Strict`,
-  );
-}
-
 /**
  * The access check lives at the carrier boundary. Every route registration,
  * fallback, and HTTP upgrade therefore shares the same decision before the
@@ -81,9 +67,11 @@ export default class DesktopWebServer extends UpstreamWebServer {
     if (config?.host !== "127.0.0.1") throw new Error("dsh desktop webserver must bind to 127.0.0.1");
     super(ctx, config);
     startDesktopControl();
-    this.register(createBrowserURLRoute(ctx));
+    const getConnection = captureConnection(ctx);
+    this.register(createBrowserURLRoute(getConnection));
+    this.register(createBrowserHandoffRoute());
     this.register(createLanURLRoute());
-    this.lanIngress = createLanHTTPIngress({ backendPort: config.port, state: accessState });
+    this.lanIngress = createLanHTTPIngress({ backendPort: config.port, state: accessState, getConnection });
     this.unsubscribePolicy = accessState.observePolicy(async ({ ordinaryBrowserEnabled, networkExposure }) => {
       if (!ordinaryBrowserEnabled) accessState.closeOrdinarySockets();
       if (ordinaryBrowserEnabled && networkExposure === NETWORK_EXPOSURES.lan) {
@@ -110,7 +98,6 @@ export default class DesktopWebServer extends UpstreamWebServer {
           rejectHttp(response);
           return;
         }
-        attachBrowserSessionCookie(request, response, classification);
         return route.handler(request, response);
       },
     });
@@ -123,7 +110,6 @@ export default class DesktopWebServer extends UpstreamWebServer {
         rejectHttp(response);
         return;
       }
-      attachBrowserSessionCookie(request, response, classification);
       return handler(request, response);
     });
   }

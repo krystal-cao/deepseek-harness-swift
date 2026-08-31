@@ -76,6 +76,7 @@ public final class DshService: @unchecked Sendable {
         case runtimeBootstrapNotFound
         case serviceNotRunning
         case portInUse(Int)
+        case unsupportedRuntimeAuthentication
         case startupFailed(String)
 
         public var errorDescription: String? {
@@ -90,6 +91,8 @@ public final class DshService: @unchecked Sendable {
                 return "DSH 服务尚未就绪，无法更新浏览器访问策略。"
             case .portInUse(let port):
                 return "端口 \(port) 已被占用。请关闭占用该端口的程序或在设置中修改端口。"
+            case .unsupportedRuntimeAuthentication:
+                return "当前 DSH 运行时的认证契约未经验证，无法安全启动。"
             case .startupFailed(let detail):
                 return "DSH 服务启动失败：\n\n\(detail)"
             }
@@ -159,6 +162,10 @@ public final class DshService: @unchecked Sendable {
         }
 
         let state = DshStateManager.shared.current
+        guard let runtimeVersion = state.selectedVersion,
+              let expectedAuthMode = DshRuntimeAuthContract.expectedMode(for: runtimeVersion) else {
+            throw ServiceError.unsupportedRuntimeAuthentication
+        }
         let access = try DshAccessController(
             ordinaryBrowserEnabled: state.browserAccessEnabled,
             networkExposure: state.networkExposure
@@ -185,6 +192,8 @@ public final class DshService: @unchecked Sendable {
             stdoutPipe: stdoutPipe,
             stderrPipe: stderrPipe,
             expectedGeneration: access.generation.id,
+            expectedPort: actualPort,
+            expectedAuthMode: expectedAuthMode,
             secrets: [access.generation.rendererToken]
         )
         processIO.start()
@@ -224,8 +233,8 @@ public final class DshService: @unchecked Sendable {
                 profile: state.appProfile,
                 port: actualPort
             )
-            let url = try await processIO.waitForReady()
-            return DshServiceSession(url: url, access: access.generation)
+            let endpoint = try await processIO.waitForReady()
+            return DshServiceSession(endpoint: endpoint, access: access.generation)
         } catch {
             await stopAndWait()
             if let serviceError = error as? ServiceError { throw serviceError }

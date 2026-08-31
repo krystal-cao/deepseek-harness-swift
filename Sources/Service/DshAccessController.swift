@@ -16,13 +16,15 @@ public struct DshAccessGeneration: Sendable {
 }
 
 public struct DshServiceSession: Sendable {
-    public let url: URL
+    public let endpoint: DshWebEndpoint
     public let access: DshAccessGeneration
 
-    public init(url: URL, access: DshAccessGeneration) {
-        self.url = url
+    public init(endpoint: DshWebEndpoint, access: DshAccessGeneration) {
+        self.endpoint = endpoint
         self.access = access
     }
+
+    public var originURL: URL { endpoint.originURL }
 }
 
 /// Owns one desktop generation and the anonymous parent-to-Node control pipe.

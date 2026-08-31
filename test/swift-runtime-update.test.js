@@ -124,9 +124,24 @@ test('version settings expose only one-way npm latest updates', () => {
   assert.doesNotMatch(VERSIONS_VIEW_SOURCE, /安装此版本/)
 })
 
+test('the running Runtime channel is independent from the update-channel picker', () => {
+  assert.match(STATE_SOURCE, /public static func inferred\(from version: String\) -> DshRuntimeChannel/)
+  assert.match(STATE_SOURCE, /case "alpha":\s*return \.alpha/)
+  assert.match(STATE_SOURCE, /case "rc":\s*return \.next/)
+  assert.match(VERSIONS_VIEW_SOURCE, /private var activeChannelName: String/)
+  assert.match(VERSIONS_VIEW_SOURCE, /DshRuntimeChannel\.inferred\(from: currentVersion\)/)
+
+  const runtimeCard = VERSIONS_VIEW_SOURCE.slice(
+    VERSIONS_VIEW_SOURCE.indexOf('"DSH Runtime"'),
+    VERSIONS_VIEW_SOURCE.indexOf('if viewModel.isInstallingVersion')
+  )
+  assert.match(runtimeCard, /activeChannelName/)
+  assert.doesNotMatch(runtimeCard, /channelName/)
+})
+
 test('runtime confirmation waits for the rendered Web UI after navigation', () => {
-  assert.match(WINDOW_SOURCE, /try await waitForWebUIReady\(\)/)
-  assert.match(WINDOW_SOURCE, /try await verifyRuntimeHealth\(session: session\)/)
+  assert.match(WINDOW_SOURCE, /try await (?:self\.)?waitForWebUIReady\(\)/)
+  assert.match(WINDOW_SOURCE, /try await verifyRuntimeHealth\(session: authenticatedSession, upstreamCookies: upstreamCookies\)/)
   assert.match(WINDOW_SOURCE, /匿名 loopback/)
   assert.match(WINDOW_SOURCE, /verifyBrowserAccessBoundary/)
   assert.match(WINDOW_SOURCE, /verifyLANAccessBoundary/)

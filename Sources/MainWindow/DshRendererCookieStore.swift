@@ -32,8 +32,8 @@ public final class DshRendererCookieStore {
     }
 
     public func install(for session: DshServiceSession) async throws {
-        guard session.url.scheme == "http",
-              session.url.host == "127.0.0.1",
+        guard session.originURL.scheme == "http",
+              session.originURL.host == "127.0.0.1",
               let originURL = URL(string: "http://127.0.0.1") else {
             throw CookieError.invalidOrigin
         }

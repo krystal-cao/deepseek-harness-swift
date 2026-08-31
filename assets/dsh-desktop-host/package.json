@@ -13,6 +13,7 @@
     "./browser-url-route": "./browser-url-route.js",
     "./lan-url-route": "./lan-url-route.js",
     "./lan-http-ingress": "./lan-http-ingress.js",
+    "./upstream-session-broker": "./upstream-session-broker.js",
     "./control": "./control.js",
     "./access-state": "./access-state.js",
     "./package.json": "./package.json"

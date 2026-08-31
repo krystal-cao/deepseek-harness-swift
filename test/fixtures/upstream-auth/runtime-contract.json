@@ -1,0 +1,16 @@
+{
+  "fixtures": [
+    {
+      "runtime": "0.1.1-rc.2",
+      "mode": "legacy",
+      "dshIntegrity": "sha512-UP1UIh6q3Gme/yXRn/QL2P8IsVlv8Shpg22TRJIZPsCRWLm4CBiA1MUvXmJAfsOEETBMLAl+xWPtFw6ICsN3wg==",
+      "connectionIntegrity": "sha512-YX2WLA/aZdDQsien4Zo7IHTEfYVJ+4QhRXbgA6BrRUM23NSP/+V3K00dQYyQVsF3ZwocE5uyvlZvbYeg1Iz4ug=="
+    },
+    {
+      "runtime": "0.1.2-alpha.2",
+      "mode": "browserTokenCookie",
+      "dshIntegrity": "sha512-4TvTC5kRKlgtSU2UTBv+cID9a2Z+6+m6mpvjXWJfVzuTkflCff6s4MsQpFJTCmwFh/k7zNWe7qFXcLYMV/5VvA==",
+      "connectionIntegrity": "sha512-au2+lgnwmJboCvW/LXLJvmyAKsUa0iISjS0T5k4TyZ80KbGQo0erIH0E9GnKbbmER6tk/Kaom9AEewAEY8TAjQ=="
+    }
+  ]
+}
