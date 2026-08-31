@@ -28,6 +28,7 @@ import {
   sanitizedCookies,
 } from '../assets/dsh-desktop-host/lan-http-ingress.js'
 import { createLanURLRoute } from '../assets/dsh-desktop-host/lan-url-route.js'
+import { createUpstreamSessionBroker } from '../assets/dsh-desktop-host/upstream-session-broker.js'
 import { createUpstreamAuthFixture, LAUNCH_TOKEN } from './fixtures/upstream-auth/server.mjs'
 
 function token() {
@@ -593,6 +594,91 @@ test('LAN HTTP streams are closed when the credential session expires', async ()
   } finally {
     await ingress.stop()
     await new Promise((resolve) => backend.close(resolve))
+  }
+})
+
+test('LAN HTTP keep-alive reuse does not let an old session expire a new request', async () => {
+  const backend = http.createServer((request, response) => {
+    if (request.url === '/b') {
+      setTimeout(() => response.end('new session response'), 900)
+      return
+    }
+    response.end('first session response')
+  })
+  await new Promise((resolve) => backend.listen(0, '127.0.0.1', resolve))
+  const backendPort = backend.address().port
+  const state = managedState({ ordinaryBrowserEnabled: true })
+  state.port = backendPort
+  state.networkExposure = NETWORK_EXPOSURES.lan
+  const firstCredential = token()
+  const secondCredential = token()
+  state.lanTokens.set(firstCredential, Date.now() + 500)
+  state.lanTokens.set(secondCredential, Date.now() + 5_000)
+  const ingress = createLanHTTPIngress({
+    backendPort,
+    state,
+    listenHost: '127.0.0.1',
+    addressProvider: () => ['127.0.0.1'],
+  })
+  const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  const requestWithAgent = (path) => new Promise((resolve) => {
+    const requestObject = http.get({
+      host: '127.0.0.1',
+      port: ingress.port(),
+      path,
+      agent,
+      headers: { host: `127.0.0.1:${ingress.port()}` },
+    }, (response) => {
+      let output = ''
+      response.setEncoding('utf8')
+      response.on('data', (chunk) => { output += chunk })
+      response.once('aborted', () => resolve({ status: response.statusCode, output, aborted: true }))
+      response.once('error', () => resolve({ status: response.statusCode, output, error: true }))
+      response.once('end', () => resolve({ status: response.statusCode, output }))
+    })
+    requestObject.once('error', () => resolve({ error: true }))
+  })
+
+  try {
+    await ingress.start()
+    const first = await requestWithAgent(`/?dsh-auth=${firstCredential}`)
+    assert.deepEqual(first, { status: 200, output: 'first session response' })
+    const second = await requestWithAgent(`/b?dsh-auth=${secondCredential}`)
+    assert.deepEqual(second, { status: 200, output: 'new session response' })
+  } finally {
+    agent.destroy()
+    await ingress.stop()
+    await new Promise((resolve) => backend.close(resolve))
+  }
+})
+
+test('upstream session socket leases can move a reused socket between sessions', async () => {
+  const state = managedState({ ordinaryBrowserEnabled: true })
+  const firstToken = token()
+  const secondToken = token()
+  state.browserTokens.set(firstToken, Date.now() + 50)
+  state.browserTokens.set(secondToken, Date.now() + 1_000)
+  const broker = createUpstreamSessionBroker({ state, backendPort: 3187 })
+  const socket = new EventEmitter()
+  socket.destroyed = false
+  socket.destroy = () => {
+    socket.destroyed = true
+    socket.emit('close')
+  }
+
+  try {
+    await broker.cookiesFor(firstToken, 'first')
+    await broker.cookiesFor(secondToken, 'second')
+    const releaseFirst = broker.trackSocket(socket, firstToken)
+    releaseFirst()
+    const releaseSecond = broker.trackSocket(socket, secondToken)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.equal(socket.destroyed, false)
+    assert.equal(state.browserTokens.has(firstToken), false)
+    assert.equal(state.browserTokens.has(secondToken), true)
+    releaseSecond()
+  } finally {
+    broker.clear()
   }
 })
 

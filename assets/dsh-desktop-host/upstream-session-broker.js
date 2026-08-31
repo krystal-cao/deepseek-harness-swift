@@ -112,6 +112,7 @@ export function createUpstreamSessionBroker({ state, backendPort, getConnection 
         upstreamCookie: undefined,
         expiryTimer: undefined,
         sockets: new Set(),
+        socketRefs: new Map(),
       };
       entry.expiryTimer = setTimeout(() => {
         if (sessions.get(browserToken) !== entry) return;
@@ -120,6 +121,7 @@ export function createUpstreamSessionBroker({ state, backendPort, getConnection 
         removeLanMapping(state, entry, browserToken);
         for (const socket of entry.sockets) socket.destroy?.();
         entry.sockets.clear();
+        entry.socketRefs.clear();
       }, Math.max(1, expiresAt - Date.now() + 1));
       entry.expiryTimer.unref?.();
       const exchange = (async () => {
@@ -154,20 +156,51 @@ export function createUpstreamSessionBroker({ state, backendPort, getConnection 
     },
 
     trackSocket(socket, browserToken) {
-      if (!socket) return;
+      if (!socket) return () => {};
       sockets.add(socket);
-      if (browserToken !== undefined) {
-        const entry = sessions.get(browserToken);
-        entry?.sockets.add(socket);
-        socket.once?.("close", () => entry?.sockets.delete(socket));
-      }
+      let entry;
+      let released = false;
       const remove = () => sockets.delete(socket);
-      socket.once?.("close", remove);
-      socket.once?.("error", remove);
+      function release() {
+        if (released) return;
+        released = true;
+        socket.off?.("close", onClose);
+        socket.off?.("error", onError);
+        if (!entry) return;
+        const count = entry.socketRefs.get(socket);
+        if (count === undefined || count <= 1) {
+          entry.socketRefs.delete(socket);
+          entry.sockets.delete(socket);
+        } else {
+          entry.socketRefs.set(socket, count - 1);
+        }
+      }
+      function onClose() {
+        release();
+        remove();
+      }
+      function onError() {
+        release();
+        remove();
+      }
+      if (browserToken !== undefined) {
+        entry = sessions.get(browserToken);
+        if (entry) {
+          entry.sockets.add(socket);
+          entry.socketRefs.set(socket, (entry.socketRefs.get(socket) ?? 0) + 1);
+        }
+      }
+      socket.once?.("close", onClose);
+      socket.once?.("error", onError);
+      return release;
     },
 
     clear() {
-      for (const entry of sessions.values()) clearTimeout(entry.expiryTimer);
+      for (const entry of sessions.values()) {
+        clearTimeout(entry.expiryTimer);
+        entry.sockets.clear();
+        entry.socketRefs.clear();
+      }
       sessions.clear();
       for (const socket of sockets) socket.destroy?.();
       sockets.clear();

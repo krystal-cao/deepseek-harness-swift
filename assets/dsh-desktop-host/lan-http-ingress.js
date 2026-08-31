@@ -278,7 +278,10 @@ export function createLanHTTPIngress({ backendPort, state, getConnection = () =>
           // A normal HTTP request can keep streaming after the initial
           // credential check. Attach both ends of the proxy to the broker
           // session so expiry/revocation closes the stream as well.
-          broker.trackSocket(request.socket, credential.browserToken);
+          const releaseClientSocket = broker.trackSocket(request.socket, credential.browserToken);
+          let releaseBackendSocket = () => {};
+          response.once("finish", releaseClientSocket);
+          response.once("close", releaseClientSocket);
           const headers = backendHeaders(request, credential.browserToken, session.upstreamCookie, backendPort);
           const proxyRequest = http.request({
             host: BACKEND_HOST,
@@ -287,14 +290,26 @@ export function createLanHTTPIngress({ backendPort, state, getConnection = () =>
             path,
             headers,
           }, (proxyResponse) => {
+            proxyResponse.once("end", releaseBackendSocket);
+            proxyResponse.once("close", releaseBackendSocket);
             const outputHeaders = responseHeaders(proxyResponse.headers, { ...request, backendPort });
             appendSessionCookie(outputHeaders, credential.lanCredential, request);
             response.writeHead(proxyResponse.statusCode ?? 502, outputHeaders);
             proxyResponse.pipe(response);
           });
-          proxyRequest.once("socket", (socket) => broker.trackSocket(socket, credential.browserToken));
-          proxyRequest.once("error", () => badGateway(response));
-          request.once("aborted", () => proxyRequest.destroy());
+          proxyRequest.once("socket", (socket) => {
+            releaseBackendSocket = broker.trackSocket(socket, credential.browserToken);
+          });
+          proxyRequest.once("error", () => {
+            releaseBackendSocket();
+            releaseClientSocket();
+            badGateway(response);
+          });
+          request.once("aborted", () => {
+            releaseBackendSocket();
+            releaseClientSocket();
+            proxyRequest.destroy();
+          });
           request.pipe(proxyRequest);
         })().catch(() => badGateway(response));
       });
