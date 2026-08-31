@@ -36,7 +36,11 @@ public struct VersionsTabView: View {
     }
 
     private var automaticUpdatesAllowed: Bool {
-        viewModel.runtimeChannel == .latest
+        runtimeUpdatesAllowed && viewModel.runtimeChannel == .latest
+    }
+
+    private var runtimeUpdatesAllowed: Bool {
+        viewModel.appProfile == .desktop
     }
 
     private var runtimeChannelSelection: Binding<DshRuntimeChannel> {
@@ -53,7 +57,8 @@ public struct VersionsTabView: View {
     }
 
     private var hasUpdate: Bool {
-        guard let current = currentVersion,
+        guard runtimeUpdatesAllowed,
+              let current = currentVersion,
               let targetVersion else { return false }
         return DshVersionManager.shared.isVersionNewer(targetVersion, than: current)
     }
@@ -108,14 +113,20 @@ public struct VersionsTabView: View {
 
             SettingsSection(
                 "更新",
-                footer: "GitHub Release、历史版本和任意降级不会参与更新流程。"
+                footer: runtimeUpdatesAllowed
+                    ? "GitHub Release、历史版本和任意降级不会参与更新流程。"
+                    : "当前为 web Profile：为避免影响终端 dsh web，DSH Runtime 版本升级已禁用；切回 desktop Profile 后恢复。"
             ) {
                 VStack(spacing: 0) {
                     SettingsRow(
-                        title: automaticUpdatesAllowed
+                        title: !runtimeUpdatesAllowed
+                            ? "web Profile 已禁用 Runtime 更新"
+                            : automaticUpdatesAllowed
                             ? (viewModel.autoFollowLatest ? "自动更新已开启" : "自动更新已关闭")
                             : "\(channelName) 通道已禁用自动更新",
-                        description: !automaticUpdatesAllowed
+                        description: !runtimeUpdatesAllowed
+                            ? "App 与终端共享 web Profile，不能在此模式下安装或切换 DSH Runtime。"
+                            : !automaticUpdatesAllowed
                             ? "\(channelName) 通道不允许自动安装；切回 stable（latest）后才可以重新启用。"
                             : (viewModel.autoFollowLatest
                                 ? "启动后自动安装并切换到 npm latest 的更高版本，完成服务和页面验证后重启 DSH。"
@@ -154,13 +165,20 @@ public struct VersionsTabView: View {
                         .pickerStyle(.menu)
                         .controlSize(.small)
                         .frame(width: 150, alignment: .trailing)
+                        .disabled(!runtimeUpdatesAllowed)
                     }
 
                     SettingsDivider()
 
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
-                            if let target = targetVersion {
+                            if !runtimeUpdatesAllowed {
+                                Text("web Profile 下不升级 DSH Runtime")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text("切回 desktop Profile 后可恢复版本更新")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            } else if let target = targetVersion {
                                 Text(hasUpdate ? "发现新版本 \(target)" : "当前已是最新版本")
                                     .font(.system(size: 12, weight: .medium))
                                 Text("npm \(channelName)：\(target)")

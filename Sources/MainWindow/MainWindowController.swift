@@ -260,9 +260,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     /// Called by a caller that already holds `withRuntimeOperation`.
     public func restartDshServiceDuringOperation() async throws -> DshServiceSession {
         let runtimeState = DshStateManager.shared.current.runtimeState
+        let appProfile = DshStateManager.shared.current.appProfile
         if runtimeState.phase == .rollingBack,
            let snapshotID = runtimeState.webProfileSnapshotID {
-            try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID) { progress in
+            try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID, profile: appProfile) { progress in
                 Task { @MainActor in
                     SettingsViewModel.shared.installProgressPhase = progress.phase
                     SettingsViewModel.shared.installProgressDetail = progress.detail
@@ -276,7 +277,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             // itself runs off-main, but stopping the old service first also
             // prevents it from mutating package metadata during the clone.
             await DshService.shared.stopAndWait()
-            let snapshotID = try await DshPluginManager.shared.createWebProfileSnapshot { progress in
+            let snapshotID = try await DshPluginManager.shared.createWebProfileSnapshot(profile: appProfile) { progress in
                 Task { @MainActor in
                     SettingsViewModel.shared.installProgressPhase = progress.phase
                     SettingsViewModel.shared.installProgressDetail = progress.detail

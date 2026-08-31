@@ -57,12 +57,13 @@ public final class DshAccessController: @unchecked Sendable {
         return (currentOrdinaryBrowserEnabled, currentNetworkExposure)
     }
 
-    public func sendBootstrap(entryPath: String, port: Int) throws {
+    public func sendBootstrap(entryPath: String, profile: DshAppProfile, port: Int) throws {
         lock.lock()
         defer { lock.unlock() }
         guard !didSendGeneration, !didCloseWriteHandle else { return }
         let message = DshBootstrapMessage(
             entryPath: entryPath,
+            profile: profile.rawValue,
             port: port,
             generation: generation.id,
             rendererToken: generation.rendererToken,

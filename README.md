@@ -63,8 +63,8 @@ DSH Swift Native Shell 是 DSH Desktop 的独立 Swift 原生 macOS 实现。它
 - **原生 macOS 窗口体验**：使用 AppKit 管理主窗口、交通灯、Dock 恢复、窗口拖拽、双击标题栏和独立设置窗口。
 - **SwiftUI 设置中心**：提供通用、版本、插件和关于页面，界面跟随系统深浅色模式。
 - **DSH 运行时管理**：应用包只内置 Node.js 和 pnpm，首次启动时从 npm Registry 下载并安装 DSH 运行时。
-- **DSH Runtime 更新**：首次启动和后续更新均从 npm Registry 获取 DSH 插件族；更新先安装 candidate，完成 Node/control、Renderer HTTP、匿名拒绝、Browser/LAN 边界和 Web UI 验证后才确认，失败时恢复完整的 Runtime 与 web Profile 快照，并暂时抑制失败版本。
-- **插件管理**：支持 web profile 插件的安装、更新、卸载和服务重启，桥接插件随应用内置。
+- **DSH Runtime 更新**：首次启动和后续更新均从 npm Registry 获取 DSH 插件族；更新先安装 candidate，完成 Node/control、Renderer HTTP、匿名拒绝、Browser/LAN 边界和 Web UI 验证后才确认，失败时恢复完整的 Runtime 与当前 Profile 快照，并暂时抑制失败版本。
+- **插件管理**：支持当前 DSH Profile 插件的安装、更新、卸载和服务重启，桥接插件随应用内置。
 - **桌面通知**：支持 DSH 任务完成通知，并可从通知恢复应用窗口。
 - **Sparkle 更新**：Swift 应用包使用 Sparkle 提供检查更新和签名更新；应用版本与 DSH npm 运行时版本彼此独立。
 - **分架构构建**：支持 Apple Silicon（arm64）和 Intel（x86_64）单独构建与打包。
@@ -83,7 +83,7 @@ DSH Swift Native Shell
 │   └── 从 npm 安装的 DSH 运行时
 │
 ├── Desktop Host Bridge
-│   └── web profile 桥接插件
+│   └── 当前 Profile 的桥接插件
 │
 └── Sparkle
     └── Swift 应用包更新
@@ -146,6 +146,8 @@ npm test
 - 通知点击恢复隐藏主窗口等少数系统交互仍有待完善。
 - 应用更新和 DSH npm 运行时更新是两套独立流程。
 - 当前只提供从已安装 Runtime 向 npm `latest`/`next`/`alpha` tag 的单向升级；默认仅通知不自动安装，`next` 和 `alpha` 只能由用户明确选择；更新失败的版本会抑制到 npm tag 变化、应用升级或用户手动重试；旧版本会保留到新 Runtime 连续两次成功启动后自动清理，暂不提供任意版本切换、卸载或降级入口。
+- App 默认使用独立的 `profiles/desktop`，终端 `dsh web` 继续使用 `profiles/web`；通用设置中切换到 `web` 后，两者会共享插件和依赖，升级或插件变更可能影响终端启动。
+- `web` Profile 下禁止 DSH Runtime 版本升级和自动更新；从 `web` 切回 `desktop` 时，应用会先停止服务，再移除 web Profile 中的 `dsh-desktop-host` 与 `@deepseek-ai/dsh-host-webserver`，避免继续污染终端环境。
 - 目前仅提供 macOS 13+、Apple Silicon 与 Intel 构建。
 
 ## 许可证

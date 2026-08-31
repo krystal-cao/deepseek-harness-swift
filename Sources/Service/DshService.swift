@@ -219,7 +219,11 @@ public final class DshService: @unchecked Sendable {
         ))
 
         do {
-            try access.sendBootstrap(entryPath: entry, port: actualPort)
+            try access.sendBootstrap(
+                entryPath: entry,
+                profile: state.appProfile,
+                port: actualPort
+            )
             let url = try await processIO.waitForReady()
             return DshServiceSession(url: url, access: access.generation)
         } catch {
@@ -284,7 +288,7 @@ public final class DshService: @unchecked Sendable {
         signalManagedProcess(managed, SIGTERM)
         // This runs from applicationWillTerminate. The old code scheduled SIGKILL
         // on a background queue 3 seconds later; once the app exits that delayed
-        // callback never fires, leaving `node bin.js --profile web` alive and the
+        // callback never fires, leaving the managed `node bin.js --profile ...` alive and the
         // port occupied. Escalate here, synchronously, so quitting never orphans
         // the server. Keep the grace short so Cmd+Q stays responsive.
         let deadline = Date().addingTimeInterval(0.6)

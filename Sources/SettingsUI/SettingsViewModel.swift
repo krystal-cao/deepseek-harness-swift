@@ -36,6 +36,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var autoFollowLatest: Bool = false
     @Published public var runtimeChannel: DshRuntimeChannel = .latest
     @Published public var npmRegistry: String = DshVersionManager.defaultRegistry
+    @Published public var appProfile: DshAppProfile = .desktop
     @Published public var dshPort: Int = 3080
     @Published public var browserAccessEnabled: Bool = false
     @Published public var networkExposure: DshNetworkExposure = .loopback
@@ -61,6 +62,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var isRefreshingPlugins: Bool = false
     @Published public var isCheckingPluginUpdates: Bool = false
     @Published public var isOperatingPlugin: Bool = false
+    @Published public var isSwitchingProfile: Bool = false
     @Published public var operatingPluginName: String? = nil
     @Published public var pluginStatusMessage: String? = nil
     @Published public var alertMessage: String? = nil
@@ -91,8 +93,10 @@ public final class SettingsViewModel: ObservableObject {
     public func loadFromState() {
         let state = DshStateManager.shared.current
         self.selectedVersion = DshVersionManager.shared.ensureSelection()
+        self.appProfile = state.appProfile
         self.runtimeChannel = state.runtimeState.channel
-        self.autoFollowLatest = self.runtimeChannel == .latest
+        self.autoFollowLatest = self.appProfile == .desktop
+            && self.runtimeChannel == .latest
             && state.runtimeState.updatePolicy == .automaticStable
         self.npmRegistry = state.npmRegistry ?? DshVersionManager.defaultRegistry
         self.dshPort = state.dshPort ?? 3080
@@ -186,7 +190,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func updatePlugin(name: String) {
-        guard !isOperatingPlugin else { return }
+        guard !isOperatingPlugin, !isSwitchingProfile else { return }
         isOperatingPlugin = true
         clearPluginStatus()
         operatingPluginName = "正在更新 \(name)…"
@@ -210,7 +214,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func updateAllPlugins() {
-        guard !isOperatingPlugin else { return }
+        guard !isOperatingPlugin, !isSwitchingProfile else { return }
         isOperatingPlugin = true
         clearPluginStatus()
         let count = installedPlugins.filter(\.hasUpdate).count
@@ -246,6 +250,10 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     private func updateToChannel(_ channel: DshRuntimeChannel) {
+        guard appProfile == .desktop else {
+            alertMessage = "web Profile 与终端共享，暂不允许升级 DSH Runtime；请切回 desktop Profile。"
+            return
+        }
         let targetVersion: String?
         switch channel {
         case .latest:
@@ -267,6 +275,10 @@ public final class SettingsViewModel: ObservableObject {
     /// active runtime. This remains separate from the UI so future channels
     /// can reuse the same transaction without restoring arbitrary switching.
     public func updateToVersion(_ version: String) {
+        guard appProfile == .desktop else {
+            alertMessage = "web Profile 与终端共享，暂不允许升级 DSH Runtime；请切回 desktop Profile。"
+            return
+        }
         let selectedTarget: String?
         switch runtimeChannel {
         case .latest:
@@ -288,7 +300,8 @@ public final class SettingsViewModel: ObservableObject {
     /// transaction as a manual update.
     public func followLatestIfEnabled() async {
         let state = DshStateManager.shared.current
-        guard autoFollowLatest,
+        guard state.appProfile == .desktop,
+              autoFollowLatest,
               state.runtimeState.channel == .latest,
               state.runtimeState.pending == nil,
               !isFollowingLatest,
@@ -349,7 +362,10 @@ public final class SettingsViewModel: ObservableObject {
             let snapshotID = state.runtimeState.webProfileSnapshotID
             if let snapshotID {
                 do {
-                    try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID) { progress in
+                    try await DshPluginManager.shared.restoreWebProfileSnapshot(
+                        snapshotID,
+                        profile: state.appProfile
+                    ) { progress in
                         Task { @MainActor in
                             self.installProgressPhase = progress.phase
                             self.installProgressDetail = progress.detail
@@ -617,6 +633,10 @@ public final class SettingsViewModel: ObservableObject {
 
     private func runRuntimeUpdate(_ item: DshVersionItem, isAutomatic: Bool = false) async {
         guard !isUpdatingRuntime else { return }
+        guard DshStateManager.shared.current.appProfile == .desktop else {
+            alertMessage = "web Profile 与终端共享，暂不允许升级 DSH Runtime；请切回 desktop Profile。"
+            return
+        }
         guard DshStateManager.shared.current.runtimeState.pending == nil else {
             alertMessage = "上一次 Runtime 更新尚未完成恢复，请重启 DSH 后再重试。"
             return
@@ -824,7 +844,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func addPlugin(spec: String) {
-        guard !isOperatingPlugin, !spec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard !isOperatingPlugin, !isSwitchingProfile, !spec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         isOperatingPlugin = true
         clearPluginStatus()
         operatingPluginName = "正在安装插件 \(spec)…"
@@ -848,7 +868,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func removePlugin(name: String) {
-        guard !isOperatingPlugin else { return }
+        guard !isOperatingPlugin, !isSwitchingProfile else { return }
         isOperatingPlugin = true
         clearPluginStatus()
         operatingPluginName = "正在卸载插件 \(name)…"
@@ -876,7 +896,7 @@ public final class SettingsViewModel: ObservableObject {
         if networkExposure != persistedExposure {
             networkExposure = persistedExposure
         }
-        if runtimeChannel != .latest, autoFollowLatest {
+        if (runtimeChannel != .latest || appProfile == .web), autoFollowLatest {
             autoFollowLatest = false
         }
         let normalizedRegistry = DshVersionManager.normalizedRegistry(npmRegistry)
@@ -893,6 +913,7 @@ public final class SettingsViewModel: ObservableObject {
         npmRegistry = normalizedRegistry
         DshStateManager.shared.update { state in
             state.dshPort = dshPort
+            state.appProfile = appProfile
             state.npmRegistry = normalizedRegistry
             state.uiTheme = uiTheme
             state.translateCommands = translateCommands
@@ -903,6 +924,55 @@ public final class SettingsViewModel: ObservableObject {
         }
         MainWindowController.shared.syncUiTheme()
         MainWindowController.shared.syncTranslateCommands()
+    }
+
+    /// Switch the app's DSH profile and restart the managed service. The
+    /// default desktop profile is isolated from terminal `dsh web`; selecting
+    /// web is an explicit opt-in to sharing its plugin and dependency tree.
+    public func setAppProfile(_ profile: DshAppProfile) {
+        guard profile != appProfile,
+              !isSwitchingProfile,
+              !isOperatingPlugin,
+              !isUpdatingRuntime,
+              !isInstallingVersion else { return }
+
+        let previous = appProfile
+        let leavingSharedWeb = previous == .web && profile == .desktop
+        appProfile = profile
+        saveGeneralSettings()
+        isSwitchingProfile = true
+        clearPluginStatus()
+
+        Task { [self] in
+            do {
+                try await MainWindowController.shared.withRuntimeOperation {
+                    if leavingSharedWeb {
+                        await DshService.shared.stopAndWait()
+                        try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+                    }
+                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation()
+                }
+                self.refreshPlugins()
+                self.isSwitchingProfile = false
+                self.showPluginStatus("已切换到 \(profile.rawValue) Profile，服务已重启")
+            } catch {
+                self.appProfile = previous
+                self.saveGeneralSettings()
+                var restoreError: Error?
+                do {
+                    _ = try await MainWindowController.shared.restartDshService()
+                    self.refreshPlugins()
+                } catch {
+                    restoreError = error
+                }
+                self.isSwitchingProfile = false
+                if let restoreError {
+                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，原 Profile 也无法恢复：\(restoreError.localizedDescription)"
+                } else {
+                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile：\(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     /// Change the live Node policy and persist the setting in the order

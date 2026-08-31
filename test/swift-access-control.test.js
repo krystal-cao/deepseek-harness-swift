@@ -28,7 +28,7 @@ test('managed DSH receives access only through an inherited control pipe', () =>
   assert.match(SERVICE_SOURCE, /standardInput\s*=\s*access\.controlReadHandle/)
   assert.match(SERVICE_SOURCE, /DSH_DESKTOP_LAUNCH"\]\s*=\s*"1"/)
   assert.match(SERVICE_SOURCE, /DSH_DESKTOP_PORT"\]\s*=\s*String\(actualPort\)/)
-  assert.match(SERVICE_SOURCE, /try\s+access\.sendBootstrap\(entryPath: entry, port: actualPort\)/)
+  assert.match(SERVICE_SOURCE, /try\s+access\.sendBootstrap\([\s\S]*profile: state\.appProfile[\s\S]*port: actualPort/)
   assert.match(SERVICE_SOURCE, /buildArguments\(runtimeBootstrap: runtimeBootstrap\)/)
   assert.match(SERVICE_SOURCE, /try\s+await\s+processIO\.waitForReady\(\)/)
   assert.match(SERVICE_SOURCE, /controlWriteHandle\.closeFile\(\)/)
@@ -42,6 +42,8 @@ test('generation credentials and NDJSON protocol are validated before encoding',
   assert.match(ACCESS_SOURCE, /replacingOccurrences\(of: "\/", with: "_"\)/)
   assert.match(PROTOCOL_SOURCE, /maxLineBytes\s*=\s*16\s*\*\s*1024/)
   assert.match(PROTOCOL_SOURCE, /outputFormatting\s*=\s*\[\.sortedKeys\]/)
+  assert.match(PROTOCOL_SOURCE, /DshAppProfile\(rawValue: message\.profile\)/)
+  assert.match(ACCESS_SOURCE, /profile\.rawValue/)
   assert.match(PROTOCOL_SOURCE, /Data\(\[0x0A\]\)/)
   assert.match(HOST_CONTROL, /MAX_LINE_BYTES\s*=\s*16\s*\*\s*1024/)
   assert.match(HOST_CONTROL, /JSON\.parse/)
@@ -134,7 +136,9 @@ test('WebKit receives a strict, HttpOnly, session-only host cookie for each gene
 
 test('first launch bootstraps the canonical profile and installs the host before DSH starts', () => {
   assert.match(PLUGIN_SOURCE, /bootstrapWebProfileManifestIfMissing/)
-  assert.match(PLUGIN_SOURCE, /"name": "dsh-profile-web"/)
+  assert.match(PLUGIN_SOURCE, /"name": "dsh-profile-/)
+  assert.match(PLUGIN_SOURCE, /profileDirectory\(for profile: DshAppProfile\)/)
+  assert.match(PLUGIN_SOURCE, /activeProfileDirectory/)
   assert.match(PLUGIN_SOURCE, /dsh\.profile\.bundles/)
   assert.match(PLUGIN_SOURCE, /proc\.arguments = \[[\s\S]*"add"[\s\S]*file:/)
   assert.match(PLUGIN_SOURCE, /@deepseek-ai\/dsh-host-webserver@/)

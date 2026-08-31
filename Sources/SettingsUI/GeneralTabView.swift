@@ -84,6 +84,29 @@ public struct GeneralTabView: View {
                 }
             }
 
+            SettingsSection(
+                "运行环境",
+                footer: "desktop 和 web 使用独立的插件目录。切换 Profile 会停止并重启 DSH 服务；选择 web 后，App 与终端 dsh web 共享插件和依赖，切回 desktop 时会清理 App 注入的桥接依赖。"
+            ) {
+                SettingsRow(
+                    title: "DSH Profile",
+                    description: viewModel.appProfile.terminalImpactDescription
+                ) {
+                    Picker("", selection: Binding(
+                        get: { viewModel.appProfile },
+                        set: { viewModel.setAppProfile($0) }
+                    )) {
+                        ForEach(DshAppProfile.allCases, id: \.self) { profile in
+                            Text(profile.displayName).tag(profile)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .frame(width: 220, alignment: .trailing)
+                    .disabled(viewModel.isSwitchingProfile || viewModel.isOperatingPlugin || viewModel.isUpdatingRuntime || viewModel.isInstallingVersion)
+                }
+            }
+
             SettingsSection("外观", footer: themeFooter) {
                 SettingsRow(
                     title: "界面主题",

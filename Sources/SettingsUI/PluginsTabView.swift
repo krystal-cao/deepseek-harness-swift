@@ -17,7 +17,7 @@ public struct PluginsTabView: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            SettingsSection("安装插件", footer: "通过 DSH 的插件机制安装到 web profile，安装或卸载成功后会自动重启 DSH 服务。") {
+            SettingsSection("安装插件", footer: "通过 DSH 的插件机制安装到当前 \(viewModel.appProfile.rawValue) Profile，安装或卸载成功后会自动重启 DSH 服务。") {
                 HStack(spacing: 9) {
                     TextField("npm 包名、@scope/name 或 github:owner/repo", text: Binding(
                         get: { localState.newPluginSpec },
@@ -140,7 +140,7 @@ public struct PluginsTabView: View {
                             .foregroundStyle(.green)
                     }
                 }
-                Text(plugin.description ?? "DSH web profile 扩展插件。")
+                Text(plugin.description ?? "DSH \(viewModel.appProfile.rawValue) Profile 扩展插件。")
                     .font(.system(size: 9.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

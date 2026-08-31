@@ -5,6 +5,7 @@ const PROTOCOL_VERSION = 1;
 const MAX_LINE_BYTES = 16 * 1024;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const SUPPORTED_PROFILES = new Set(["desktop", "web"]);
 
 let started = false;
 let controlReadyAnnounced = false;
@@ -58,7 +59,7 @@ function validatePolicy(message) {
 function validateBootstrap(message) {
   if (!isObject(message) || message.v !== PROTOCOL_VERSION || message.type !== "bootstrap") throw new Error("invalid bootstrap message");
   if (typeof message.entryPath !== "string" || !isAbsolute(message.entryPath) || message.entryPath.includes("\0")) throw new Error("invalid bootstrap entry path");
-  if (message.profile !== "web") throw new Error("invalid bootstrap profile");
+  if (typeof message.profile !== "string" || !SUPPORTED_PROFILES.has(message.profile)) throw new Error("invalid bootstrap profile");
   if (message.host !== "127.0.0.1") throw new Error("invalid bootstrap host");
   if (!Number.isSafeInteger(message.port) || message.port < 1024 || message.port > 65535) throw new Error("invalid bootstrap port");
   if (!isValidGeneration(message.generation)) throw new Error("invalid bootstrap generation");

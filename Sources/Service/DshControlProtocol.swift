@@ -52,7 +52,7 @@ public struct DshBootstrapMessage: Codable, Sendable {
 
     public init(
         entryPath: String,
-        profile: String = "web",
+        profile: String = "desktop",
         host: String = "127.0.0.1",
         port: Int,
         generation: UUID,
@@ -122,7 +122,7 @@ public enum DshControlProtocol {
               message.type == "bootstrap",
               message.entryPath.hasPrefix("/"),
               !message.entryPath.contains("\0"),
-              message.profile == "web",
+              DshAppProfile(rawValue: message.profile) != nil,
               message.host == "127.0.0.1",
               (1024...65535).contains(message.port),
               UUID(uuidString: message.generation) != nil,

@@ -16,6 +16,29 @@ public enum DshRuntimeChannel: String, Codable, Sendable {
     case alpha
 }
 
+/// The DSH profile used by the desktop app. The isolated desktop profile is
+/// the default so terminal `dsh web` keeps its own dependency tree.
+public enum DshAppProfile: String, Codable, CaseIterable, Hashable, Sendable {
+    case desktop
+    case web
+
+    public var displayName: String {
+        switch self {
+        case .desktop: return "desktop（推荐）"
+        case .web: return "web（与终端共享）"
+        }
+    }
+
+    public var terminalImpactDescription: String {
+        switch self {
+        case .desktop:
+            return "App 使用独立的 profiles/desktop；终端 dsh web 继续使用 profiles/web，插件和依赖互不影响。"
+        case .web:
+            return "App 与终端 dsh web 共用 profiles/web；插件变更可能影响终端启动，切回 desktop 时会清理 App 注入的桥接依赖。"
+        }
+    }
+}
+
 public enum DshRuntimeTransactionPhase: String, Codable, Sendable {
     case idle
     case staging
@@ -234,6 +257,7 @@ public enum DshRuntimeTransaction {
 /// Persistent configuration and state model for DSH Desktop.
 public struct DshStateConfig: Codable, Equatable {
     public var selectedVersion: String?
+    public var appProfile: DshAppProfile
     public var dismissedLatest: String?
     public var autoFollowLatest: Bool
     public var npmRegistry: String?
@@ -247,6 +271,7 @@ public struct DshStateConfig: Codable, Equatable {
 
     public init(
         selectedVersion: String? = nil,
+        appProfile: DshAppProfile = .desktop,
         dismissedLatest: String? = nil,
         autoFollowLatest: Bool = false,
         npmRegistry: String? = nil,
@@ -259,6 +284,7 @@ public struct DshStateConfig: Codable, Equatable {
         cachedUserPath: String? = nil
     ) {
         self.selectedVersion = selectedVersion
+        self.appProfile = appProfile
         self.dismissedLatest = dismissedLatest
         self.autoFollowLatest = autoFollowLatest
         self.npmRegistry = npmRegistry
@@ -273,6 +299,7 @@ public struct DshStateConfig: Codable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case selectedVersion
+        case appProfile
         case dismissedLatest
         case autoFollowLatest
         case npmRegistry
@@ -288,6 +315,10 @@ public struct DshStateConfig: Codable, Equatable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.selectedVersion = try container.decodeIfPresent(String.self, forKey: .selectedVersion)
+        // Legacy state files used the shared web profile. New app launches
+        // intentionally migrate to an isolated desktop profile; the old web
+        // directory is left untouched for terminal DSH usage.
+        self.appProfile = try container.decodeIfPresent(DshAppProfile.self, forKey: .appProfile) ?? .desktop
         self.dismissedLatest = try container.decodeIfPresent(String.self, forKey: .dismissedLatest)
         // New profiles default to notification-only updates. If an older
         // profile explicitly persisted autoFollowLatest, preserve that user
@@ -318,6 +349,7 @@ public struct DshStateConfig: Codable, Equatable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encodeIfPresent(selectedVersion, forKey: .selectedVersion)
+        try container.encode(appProfile, forKey: .appProfile)
         try container.encodeIfPresent(dismissedLatest, forKey: .dismissedLatest)
         try container.encode(autoFollowLatest, forKey: .autoFollowLatest)
         try container.encodeIfPresent(npmRegistry, forKey: .npmRegistry)
