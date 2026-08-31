@@ -43,8 +43,8 @@ public final class DshPluginManager {
 
     public static let desktopHostPluginName = "dsh-desktop-host"
     /// Packages required by the managed desktop bridge but not user-managed
-    /// plugins. They stay in the web profile so the bridge's peer dependency
-    /// and Cordis patch target remain resolvable.
+    /// plugins. They stay in the selected profile so the bridge's peer
+    /// dependency and Cordis patch target remain resolvable.
     private static let internalPluginDependencyNames: Set<String> = [
         "@deepseek-ai/dsh-host-webserver",
     ]
@@ -60,16 +60,28 @@ public final class DshPluginManager {
         "access-state.js",
         "cordis.patch.yml",
     ]
-    private static let standardWebProfileBundles = [
+    private static let standardProfileBundles = [
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app"
     ]
     private static let webProfileSnapshotDirectoryName = "dsh-runtime-profile-snapshots"
     private static let missingProfileMarkerName = ".profile-was-missing"
 
-    public static var webProfileDirectory: URL {
+    public static func profileDirectory(for profile: DshAppProfile) -> URL {
         let dshHome = ProcessInfo.processInfo.environment["DSH_HOME"] ?? (NSHomeDirectory() as NSString).appendingPathComponent(".dsh")
-        return URL(fileURLWithPath: dshHome).appendingPathComponent("profiles/web", isDirectory: true)
+        return URL(fileURLWithPath: dshHome)
+            .appendingPathComponent("profiles", isDirectory: true)
+            .appendingPathComponent(profile.rawValue, isDirectory: true)
+    }
+
+    /// Kept for snapshot harnesses and migration tooling that explicitly
+    /// targets the terminal-owned web profile.
+    public static var webProfileDirectory: URL {
+        profileDirectory(for: .web)
+    }
+
+    public static var activeProfileDirectory: URL {
+        profileDirectory(for: DshStateManager.shared.current.appProfile)
     }
 
     private init() {}
@@ -201,11 +213,12 @@ public final class DshPluginManager {
     }
 
     private static func createWebProfileSnapshotSynchronously(
+        profile: DshAppProfile,
         onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void
     ) throws -> String {
         let id = UUID().uuidString
         let snapshotURL = try webProfileSnapshotURL(for: id)
-        let profileURL = webProfileDirectory
+        let profileURL = profileDirectory(for: profile)
         let snapshotDirectory = webProfileSnapshotDirectory
         let fileManager = FileManager.default
 
@@ -245,10 +258,11 @@ public final class DshPluginManager {
 
     private static func restoreWebProfileSnapshotSynchronously(
         _ id: String,
+        profile: DshAppProfile,
         onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void
     ) throws {
         let snapshotURL = try webProfileSnapshotURL(for: id)
-        let profileURL = webProfileDirectory
+        let profileURL = profileDirectory(for: profile)
         let savedProfileURL = snapshotURL.appendingPathComponent("profile", isDirectory: true)
         let missingMarkerURL = snapshotURL.appendingPathComponent(missingProfileMarkerName)
         let fileManager = FileManager.default
@@ -320,10 +334,11 @@ public final class DshPluginManager {
     /// node_modules. The snapshot is referenced by persisted transaction
     /// state and is kept until the new Runtime has survived two starts.
     public func createWebProfileSnapshot(
+        profile: DshAppProfile = .web,
         onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void = { _ in }
     ) async throws -> String {
         try await Task.detached(priority: .utility) {
-            try Self.createWebProfileSnapshotSynchronously(onProgress: onProgress)
+            try Self.createWebProfileSnapshotSynchronously(profile: profile, onProgress: onProgress)
         }.value
     }
 
@@ -332,10 +347,11 @@ public final class DshPluginManager {
     /// copy succeeds, so a failed copy does not silently destroy both states.
     public func restoreWebProfileSnapshot(
         _ id: String,
+        profile: DshAppProfile = .web,
         onProgress: @escaping @Sendable (DshProfileSnapshotProgress) -> Void = { _ in }
     ) async throws {
         try await Task.detached(priority: .utility) {
-            try Self.restoreWebProfileSnapshotSynchronously(id, onProgress: onProgress)
+            try Self.restoreWebProfileSnapshotSynchronously(id, profile: profile, onProgress: onProgress)
         }.value
     }
 
@@ -375,9 +391,9 @@ public final class DshPluginManager {
         }.value
     }
 
-    /// List all installed plugins in the web profile.
+    /// List all installed plugins in the selected DSH profile.
     public func listPlugins(outdatedMap: [String: String] = [:]) -> [DshPluginItem] {
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         let pkgUrl = profileDir.appendingPathComponent("package.json")
         guard let data = try? Data(contentsOf: pkgUrl),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -436,7 +452,7 @@ public final class DshPluginManager {
     /// bundles. DSH's own packages and the shell bridge are deliberately
     /// excluded because they are part of the built-in profile, not user themes.
     public func detectExternalTheme() -> String? {
-        let packageURL = Self.webProfileDirectory.appendingPathComponent("package.json")
+        let packageURL = Self.activeProfileDirectory.appendingPathComponent("package.json")
         guard let data = try? Data(contentsOf: packageURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -474,7 +490,7 @@ public final class DshPluginManager {
             _ = repairDesktopHostDependency(hostBundle)
         }
 
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         guard FileManager.default.fileExists(atPath: profileDir.appendingPathComponent("package.json").path) else {
             return [:]
         }
@@ -533,7 +549,7 @@ public final class DshPluginManager {
             _ = repairDesktopHostDependency(hostBundle)
         }
 
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
 
         let proc = Process()
@@ -577,7 +593,7 @@ public final class DshPluginManager {
             _ = repairDesktopHostDependency(hostBundle)
         }
 
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
@@ -611,7 +627,7 @@ public final class DshPluginManager {
             _ = repairDesktopHostDependency(hostBundle)
         }
 
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         let pluginNames = listPlugins()
             .filter { !$0.isManaged && !$0.isLocal }
             .map(\.name)
@@ -655,7 +671,7 @@ public final class DshPluginManager {
             _ = repairDesktopHostDependency(hostBundle)
         }
 
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
@@ -691,8 +707,13 @@ public final class DshPluginManager {
         try updateProfileBundle(name, removing: true)
     }
 
-    private func updateProfileBundle(_ name: String, removing: Bool) throws {
-        let packageURL = Self.webProfileDirectory.appendingPathComponent("package.json")
+    private func updateProfileBundle(
+        _ name: String,
+        removing: Bool,
+        profileDir: URL? = nil
+    ) throws {
+        let profileDir = profileDir ?? Self.activeProfileDirectory
+        let packageURL = profileDir.appendingPathComponent("package.json")
         guard let data = try? Data(contentsOf: packageURL),
               var root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               var dsh = root["dsh"] as? [String: Any],
@@ -716,6 +737,83 @@ public final class DshPluginManager {
         root["dsh"] = dsh
         let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
         try updated.write(to: packageURL, options: .atomic)
+    }
+
+    /// Remove the desktop shell bridge from an explicitly selected profile.
+    /// This is used only when leaving the shared web profile so terminal
+    /// `dsh web` is returned to its normal upstream dependency tree.
+    public func removeDesktopHostArtifacts(from profile: DshAppProfile) async throws {
+        guard profile == .web else { return }
+        let profileDir = Self.profileDirectory(for: profile)
+        let packageURL = profileDir.appendingPathComponent("package.json")
+        guard let data = try? Data(contentsOf: packageURL),
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
+
+        let dependencies = root["dependencies"] as? [String: String] ?? [:]
+        let dependenciesToRemove = [
+            Self.desktopHostPluginName,
+            "@deepseek-ai/dsh-host-webserver"
+        ].filter { dependencies[$0] != nil }
+
+        if !dependenciesToRemove.isEmpty {
+            guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
+                  let node = NodeRuntime.shared.resolveNodeBinary() else {
+                throw NSError(domain: "DshPluginManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "缺少 Node 或 pnpm，无法清理 web Profile 桥接依赖"])
+            }
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: pnpm)
+            proc.currentDirectoryURL = profileDir
+            proc.arguments = ["remove"] + dependenciesToRemove + [
+                "--config.minimum-release-age=0",
+                "--reporter=append-only"
+            ]
+
+            var env = NodeRuntime.shared.buildEnvironment()
+            env["DSH_NODE_BIN"] = node
+            env["npm_config_registry"] = DshVersionManager.normalizedRegistry(
+                DshStateManager.shared.current.npmRegistry
+            )
+            proc.environment = env
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            proc.standardOutput = stdout
+            proc.standardError = stderr
+
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else {
+                let detail = processOutput(stdout: stdout, stderr: stderr)
+                throw NSError(
+                    domain: "DshPluginManager",
+                    code: -18,
+                    userInfo: [NSLocalizedDescriptionKey: "清理 web Profile 桥接依赖失败（退出码 \(proc.terminationStatus)）\(detail)"]
+                )
+            }
+        }
+
+        // pnpm removes direct links and lockfile entries. Keep DSH's bundle
+        // manifest synchronized as well; otherwise the next `dsh web` boot
+        // would try to load the deleted bridge again.
+        try updateProfileBundle(
+            Self.desktopHostPluginName,
+            removing: true,
+            profileDir: profileDir
+        )
+
+        // Clean stale links left by interrupted pnpm operations. These are
+        // exact children of the selected profile and never touch pnpm's store.
+        let fileManager = FileManager.default
+        let stalePaths = [
+            profileDir.appendingPathComponent("node_modules/dsh-desktop-host", isDirectory: true),
+            profileDir.appendingPathComponent("node_modules/@deepseek-ai/dsh-host-webserver", isDirectory: true)
+        ]
+        for path in stalePaths where fileManager.fileExists(atPath: path.path) {
+            try fileManager.removeItem(at: path)
+        }
     }
 
     private func packageName(from spec: String) -> String? {
@@ -783,7 +881,7 @@ public final class DshPluginManager {
     /// app.asar.unpacked; Swift packages store it directly under Resources.
     @discardableResult
     private func repairDesktopHostDependency(_ hostBundle: String) -> Bool {
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         let packageURL = profileDir.appendingPathComponent("package.json")
         let lockURL = profileDir.appendingPathComponent("pnpm-lock.yaml")
         let hostSpec = "file:\(hostBundle)"
@@ -888,25 +986,26 @@ public final class DshPluginManager {
         return version
     }
 
-    /// Create the canonical web profile manifest before pnpm is invoked.
+    /// Create the canonical selected-profile manifest before pnpm is invoked.
     ///
     /// DSH normally creates this file during its first boot. That ordering is
     /// unsafe for the desktop shell because the first boot would use the
     /// upstream, unprotected WebServer before the managed host can be added.
-    /// The shape mirrors DSH's standard web profile initializer and preserves
+    /// The shape mirrors DSH's standard profile initializer and preserves
     /// any existing user dependencies and bundle order.
     public func bootstrapWebProfileManifestIfMissing() throws {
-        let profileDir = Self.webProfileDirectory
+        let selectedProfile = DshStateManager.shared.current.appProfile
+        let profileDir = Self.activeProfileDirectory
         try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
         let packageURL = profileDir.appendingPathComponent("package.json")
 
         if !FileManager.default.fileExists(atPath: packageURL.path) {
             let root: [String: Any] = [
-                "name": "dsh-profile-web",
+                "name": "dsh-profile-\(selectedProfile.rawValue)",
                 "private": true,
                 "dependencies": [String: String](),
                 "dsh": [
-                    "profile": ["bundles": Self.standardWebProfileBundles]
+                    "profile": ["bundles": Self.standardProfileBundles]
                 ]
             ]
             let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
@@ -919,13 +1018,13 @@ public final class DshPluginManager {
             throw NSError(
                 domain: "DshPluginManager",
                 code: -11,
-                userInfo: [NSLocalizedDescriptionKey: "无法读取 web Profile manifest"]
+                userInfo: [NSLocalizedDescriptionKey: "无法读取 \(selectedProfile.rawValue) Profile manifest"]
             )
         }
 
         var changed = false
         if root["name"] == nil {
-            root["name"] = "dsh-profile-web"
+            root["name"] = "dsh-profile-\(selectedProfile.rawValue)"
             changed = true
         }
         if root["private"] == nil {
@@ -939,7 +1038,7 @@ public final class DshPluginManager {
             throw NSError(
                 domain: "DshPluginManager",
                 code: -17,
-                userInfo: [NSLocalizedDescriptionKey: "web Profile manifest 的 dependencies 格式无效"]
+                userInfo: [NSLocalizedDescriptionKey: "\(selectedProfile.rawValue) Profile manifest 的 dependencies 格式无效"]
             )
         }
 
@@ -948,7 +1047,7 @@ public final class DshPluginManager {
         if let bundles = profile["bundles"] as? [String], !bundles.isEmpty {
             if !changed { return }
         } else {
-            profile["bundles"] = Self.standardWebProfileBundles
+            profile["bundles"] = Self.standardProfileBundles
             changed = true
         }
         dsh["profile"] = profile
@@ -966,7 +1065,7 @@ public final class DshPluginManager {
     /// user's installed plugin dependencies and restore only the missing DSH
     /// profile section so the normal DSH initializer can continue.
     public func repairWebProfileManifestIfNeeded() {
-        let packageURL = Self.webProfileDirectory.appendingPathComponent("package.json")
+        let packageURL = Self.activeProfileDirectory.appendingPathComponent("package.json")
         guard let data = try? Data(contentsOf: packageURL),
               var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return
@@ -978,7 +1077,7 @@ public final class DshPluginManager {
             return
         }
 
-        profile["bundles"] = Self.standardWebProfileBundles
+        profile["bundles"] = Self.standardProfileBundles
         dsh["profile"] = profile
         root["dsh"] = dsh
 
@@ -993,7 +1092,7 @@ public final class DshPluginManager {
     /// A completely new profile is intentionally left for the first DSH boot
     /// so DSH can write its canonical package metadata first.
     public func hasInitializedWebProfileManifest() -> Bool {
-        let packageURL = Self.webProfileDirectory.appendingPathComponent("package.json")
+        let packageURL = Self.activeProfileDirectory.appendingPathComponent("package.json")
         guard let data = try? Data(contentsOf: packageURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dsh = root["dsh"] as? [String: Any],
@@ -1005,7 +1104,7 @@ public final class DshPluginManager {
     }
 
     /// Ensure the built-in desktop host bridge plugin is installed and valid
-    /// in the web profile. Failure is thrown so callers cannot start a bare
+    /// in the selected profile. Failure is thrown so callers cannot start a bare
     /// WebServer as a fallback.
     public func ensureDesktopHostPlugin(registry: String? = nil) async throws -> Bool {
         guard let hostBundle = NodeRuntime.shared.resolveDesktopHostBundlePath() else {
@@ -1021,7 +1120,7 @@ public final class DshPluginManager {
         try validateDesktopHostBundle(hostBundle)
         try bootstrapWebProfileManifestIfMissing()
 
-        let profileDir = Self.webProfileDirectory
+        let profileDir = Self.activeProfileDirectory
         let hostSpec = "file:\(hostBundle)"
         let installedHostIsCurrent = isInstalledDesktopHostBundle(
             profileDir: profileDir,
@@ -1057,6 +1156,7 @@ public final class DshPluginManager {
             + [
                 "file:\(hostBundle)",
                 "@deepseek-ai/dsh-host-webserver@\(dshVersion)",
+                "--config.minimum-release-age=0",
                 "--registry", DshVersionManager.normalizedRegistry(registry ?? DshStateManager.shared.current.npmRegistry),
                 "--reporter=append-only"
             ]
@@ -1154,7 +1254,7 @@ public final class DshPluginManager {
     }
 
     private func profileContainsBundle(_ name: String) -> Bool {
-        let packageURL = Self.webProfileDirectory.appendingPathComponent("package.json")
+        let packageURL = Self.activeProfileDirectory.appendingPathComponent("package.json")
         guard let data = try? Data(contentsOf: packageURL),
               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dsh = root["dsh"] as? [String: Any],
