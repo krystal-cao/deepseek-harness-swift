@@ -546,6 +546,56 @@ test('LAN HTTP ingress proxies only an authenticated public request and strips R
   }
 })
 
+test('LAN HTTP streams are closed when the credential session expires', async () => {
+  const backend = http.createServer((_request, response) => {
+    setTimeout(() => response.end('late response'), 1_000)
+  })
+  await new Promise((resolve) => backend.listen(0, '127.0.0.1', resolve))
+  const backendPort = backend.address().port
+  const state = managedState({ ordinaryBrowserEnabled: true })
+  state.port = backendPort
+  state.networkExposure = NETWORK_EXPOSURES.lan
+  const credential = token()
+  const ingress = createLanHTTPIngress({
+    backendPort,
+    state,
+    listenHost: '127.0.0.1',
+    addressProvider: () => ['127.0.0.1'],
+  })
+
+  try {
+    await ingress.start()
+    state.lanTokens.set(credential, Date.now() + 300)
+    const outcome = await new Promise((resolve) => {
+      let settled = false
+      const finish = (value) => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+      const requestObject = http.get({
+        host: '127.0.0.1',
+        port: ingress.port(),
+        path: `/?dsh-auth=${credential}`,
+        headers: { host: `127.0.0.1:${ingress.port()}` },
+      }, (response) => {
+        response.resume()
+        response.once('aborted', () => finish('aborted'))
+        response.once('error', () => finish('error'))
+        response.once('end', () => finish('completed'))
+      })
+      requestObject.once('error', () => finish('error'))
+    })
+
+    assert.notEqual(outcome, 'completed', 'an expired LAN session must not finish an existing HTTP stream')
+    assert.equal(state.browserTokens.size, 0)
+    assert.equal(state.lanBrowserTokens.size, 0)
+  } finally {
+    await ingress.stop()
+    await new Promise((resolve) => backend.close(resolve))
+  }
+})
+
 test('LAN ingress brokers B plus upstream U against the alpha.2 fixture while exposing only L', async (t) => {
   const fixture = await createUpstreamAuthFixture({ mode: 'alpha' })
   t.after(() => fixture.close())

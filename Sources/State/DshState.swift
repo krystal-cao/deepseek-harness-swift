@@ -89,6 +89,10 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
     public var active: NpmRuntimeDescriptor?
     public var previous: NpmRuntimeDescriptor?
     public var pending: NpmRuntimeDescriptor?
+    /// Profile that owns an in-flight Runtime transaction. This is persisted
+    /// so a failed rollback can never restore a desktop snapshot into the
+    /// shared web profile after a later app-profile change.
+    public var profile: DshAppProfile
     public var phase: DshRuntimeTransactionPhase
     public var updatePolicy: DshRuntimeUpdatePolicy
     public var channel: DshRuntimeChannel
@@ -102,6 +106,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         active: NpmRuntimeDescriptor? = nil,
         previous: NpmRuntimeDescriptor? = nil,
         pending: NpmRuntimeDescriptor? = nil,
+        profile: DshAppProfile = .desktop,
         phase: DshRuntimeTransactionPhase = .idle,
         updatePolicy: DshRuntimeUpdatePolicy = .notify,
         channel: DshRuntimeChannel = .latest,
@@ -114,6 +119,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         self.active = active
         self.previous = previous
         self.pending = pending
+        self.profile = profile
         self.phase = phase
         self.updatePolicy = channel == .latest ? updatePolicy : .notify
         self.channel = channel
@@ -128,6 +134,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         case active
         case previous
         case pending
+        case profile
         case phase
         case updatePolicy
         case channel
@@ -143,6 +150,9 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         self.active = try container.decodeIfPresent(NpmRuntimeDescriptor.self, forKey: .active)
         self.previous = try container.decodeIfPresent(NpmRuntimeDescriptor.self, forKey: .previous)
         self.pending = try container.decodeIfPresent(NpmRuntimeDescriptor.self, forKey: .pending)
+        // Runtime updates have always been restricted to desktop. Missing
+        // metadata therefore safely migrates legacy transactions to desktop.
+        self.profile = try container.decodeIfPresent(DshAppProfile.self, forKey: .profile) ?? .desktop
         self.phase = try container.decodeIfPresent(DshRuntimeTransactionPhase.self, forKey: .phase) ?? .idle
         self.updatePolicy = try container.decodeIfPresent(DshRuntimeUpdatePolicy.self, forKey: .updatePolicy) ?? .notify
         self.channel = try container.decodeIfPresent(DshRuntimeChannel.self, forKey: .channel) ?? .latest
@@ -197,12 +207,14 @@ public enum DshRuntimeTransaction {
         active: NpmRuntimeDescriptor,
         candidate: NpmRuntimeDescriptor,
         updatePolicy: DshRuntimeUpdatePolicy,
-        channel: DshRuntimeChannel
+        channel: DshRuntimeChannel,
+        profile: DshAppProfile = .desktop
     ) -> DshRuntimeState {
         DshRuntimeState(
             active: active,
             previous: active,
             pending: candidate,
+            profile: profile,
             phase: .staging,
             updatePolicy: updatePolicy,
             channel: channel,
@@ -213,10 +225,14 @@ public enum DshRuntimeTransaction {
 
     public static func attachWebProfileSnapshot(
         _ state: DshRuntimeState,
-        id: String
+        id: String,
+        profile: DshAppProfile? = nil
     ) -> DshRuntimeState {
         var next = state
         next.webProfileSnapshotID = id
+        if let profile {
+            next.profile = profile
+        }
         return next
     }
 

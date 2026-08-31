@@ -103,7 +103,7 @@ public struct GeneralTabView: View {
                     .pickerStyle(.menu)
                     .controlSize(.small)
                     .frame(width: 220, alignment: .trailing)
-                    .disabled(viewModel.isSwitchingProfile || viewModel.isOperatingPlugin || viewModel.isUpdatingRuntime || viewModel.isInstallingVersion)
+                    .disabled(viewModel.isSwitchingProfile || viewModel.isOperatingPlugin || viewModel.isUpdatingRuntime || viewModel.isInstallingVersion || viewModel.isRuntimeRecoveryPending)
                 }
             }
 

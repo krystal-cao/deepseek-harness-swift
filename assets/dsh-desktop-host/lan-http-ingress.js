@@ -275,6 +275,10 @@ export function createLanHTTPIngress({ backendPort, state, getConnection = () =>
             badGateway(response);
             return;
           }
+          // A normal HTTP request can keep streaming after the initial
+          // credential check. Attach both ends of the proxy to the broker
+          // session so expiry/revocation closes the stream as well.
+          broker.trackSocket(request.socket, credential.browserToken);
           const headers = backendHeaders(request, credential.browserToken, session.upstreamCookie, backendPort);
           const proxyRequest = http.request({
             host: BACKEND_HOST,
@@ -288,6 +292,7 @@ export function createLanHTTPIngress({ backendPort, state, getConnection = () =>
             response.writeHead(proxyResponse.statusCode ?? 502, outputHeaders);
             proxyResponse.pipe(response);
           });
+          proxyRequest.once("socket", (socket) => broker.trackSocket(socket, credential.browserToken));
           proxyRequest.once("error", () => badGateway(response));
           request.once("aborted", () => proxyRequest.destroy());
           request.pipe(proxyRequest);

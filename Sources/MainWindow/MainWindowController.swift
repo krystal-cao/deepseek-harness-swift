@@ -270,7 +270,18 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         let appProfile = DshStateManager.shared.current.appProfile
         if runtimeState.phase == .rollingBack,
            let snapshotID = runtimeState.webProfileSnapshotID {
-            try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID, profile: appProfile) { progress in
+            let snapshotProfile = runtimeState.profile
+            guard appProfile == snapshotProfile else {
+                throw NSError(
+                    domain: "DshRuntimeUpdate",
+                    code: -5,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Runtime 回滚需要恢复 \(snapshotProfile.rawValue) Profile，但当前选择的是 \(appProfile.rawValue) Profile；为保护共享 Profile，已暂停启动。"
+                    ]
+                )
+            }
+            try await DshPluginManager.shared.restoreWebProfileSnapshot(snapshotID, profile: snapshotProfile) { progress in
                 Task { @MainActor in
                     SettingsViewModel.shared.installProgressPhase = progress.phase
                     SettingsViewModel.shared.installProgressDetail = progress.detail
@@ -295,7 +306,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                       [.switching, .verifying].contains(state.runtimeState.phase) else { return }
                 state.runtimeState = DshRuntimeTransaction.attachWebProfileSnapshot(
                     state.runtimeState,
-                    id: snapshotID
+                    id: snapshotID,
+                    profile: appProfile
                 )
             }
         }

@@ -54,6 +54,11 @@ public final class SettingsViewModel: ObservableObject {
 
     @Published public var isInstallingVersion: Bool = false
     @Published public var isUpdatingRuntime: Bool = false
+    /// A failed Runtime rollback remains blocked until startup recovery has
+    /// verified the previous Runtime. Keeping this published prevents the
+    /// Profile picker from becoming active when the update task has already
+    /// returned an error.
+    @Published public private(set) var isRuntimeRecoveryPending: Bool = false
     @Published public var installingVersionName: String? = nil
     @Published public var installProgressPhase: String = ""
     @Published public var installProgressDetail: String? = nil
@@ -93,8 +98,24 @@ public final class SettingsViewModel: ObservableObject {
 
     public func loadFromState() {
         let state = DshStateManager.shared.current
+        let hasPendingRuntimeRecovery = state.runtimeState.pending != nil
+        let transactionProfile = state.runtimeState.profile
+        let effectiveProfile = hasPendingRuntimeRecovery ? transactionProfile : state.appProfile
+        if hasPendingRuntimeRecovery, state.appProfile != transactionProfile {
+            // This can only be encountered when an older build persisted a
+            // profile switch while rollback was pending. Repair it before any
+            // service launch so the retained snapshot is restored only to its
+            // owning Profile.
+            DshStateManager.shared.update { state in
+                guard state.runtimeState.pending != nil,
+                      state.runtimeState.profile == transactionProfile else { return }
+                state.appProfile = transactionProfile
+            }
+            self.alertMessage = "检测到未完成的 Runtime 回滚，已切回 \(transactionProfile.rawValue) Profile 以保护 Profile 数据。"
+        }
         self.selectedVersion = DshVersionManager.shared.ensureSelection()
-        self.appProfile = state.appProfile
+        self.appProfile = effectiveProfile
+        self.isRuntimeRecoveryPending = hasPendingRuntimeRecovery
         self.runtimeChannel = state.runtimeState.channel
         self.autoFollowLatest = self.appProfile == .desktop
             && self.runtimeChannel == .latest
@@ -114,6 +135,10 @@ public final class SettingsViewModel: ObservableObject {
             self.alertMessage = diagnostic
             DshStateManager.shared.update { $0.runtimeState.lastDiagnostic = nil }
         }
+    }
+
+    private func syncRuntimeRecoveryState() {
+        isRuntimeRecoveryPending = DshStateManager.shared.current.runtimeState.pending != nil
     }
 
     /// Refresh the profile-based theme state after plugin changes or when the
@@ -342,6 +367,7 @@ public final class SettingsViewModel: ObservableObject {
                 state.runtimeState.active = active
                 state.runtimeState.healthyStartCount = 1
             }
+            syncRuntimeRecoveryState()
 
         case .rollback(let active, _):
             let message = "检测到上次 Runtime 更新在\(recoveryPhaseDescription(state.runtimeState.phase))中断，将恢复到 \(active.version)。"
@@ -359,15 +385,23 @@ public final class SettingsViewModel: ObservableObject {
             // owns the single restore operation immediately before that start;
             // doing it here as well would restore the 4 GB Profile twice.
             self.alertMessage = "\(message) 已准备恢复，正在验证旧 Runtime。"
+            syncRuntimeRecoveryState()
 
         case .reset(let candidate):
             let message = "检测到上次 Runtime 更新在\(recoveryPhaseDescription(state.runtimeState.phase))中断，且没有可用的回滚 Runtime，请重新安装。"
             let snapshotID = state.runtimeState.webProfileSnapshotID
+            let snapshotProfile = state.runtimeState.profile
+            guard state.appProfile == snapshotProfile else {
+                let diagnostic = "\(message) 但快照属于 \(snapshotProfile.rawValue) Profile，当前为 \(state.appProfile.rawValue)，为保护 Profile 数据暂不恢复。"
+                self.alertMessage = diagnostic
+                syncRuntimeRecoveryState()
+                return
+            }
             if let snapshotID {
                 do {
                     try await DshPluginManager.shared.restoreWebProfileSnapshot(
                         snapshotID,
-                        profile: state.appProfile
+                        profile: snapshotProfile
                     ) { progress in
                         Task { @MainActor in
                             self.installProgressPhase = progress.phase
@@ -383,6 +417,7 @@ public final class SettingsViewModel: ObservableObject {
                         )
                     }
                     self.alertMessage = diagnostic
+                    syncRuntimeRecoveryState()
                     return
                 }
             }
@@ -415,6 +450,7 @@ public final class SettingsViewModel: ObservableObject {
                 }
             }
             self.alertMessage = finalMessage
+            syncRuntimeRecoveryState()
         }
     }
 
@@ -629,6 +665,7 @@ public final class SettingsViewModel: ObservableObject {
             state.runtimeState.lastDiagnostic = diagnostic
         }
         guard didCommit else { return }
+        syncRuntimeRecoveryState()
         if let diagnostic {
             alertMessage = "已恢复到 \(active.version)，但\(diagnostic)"
         }
@@ -685,6 +722,7 @@ public final class SettingsViewModel: ObservableObject {
                 state.runtimeState.dismissedVersion = item.version
                 state.runtimeState.dismissedAppVersion = currentAppVersion
             }
+            syncRuntimeRecoveryState()
             alertMessage = error.localizedDescription
         }
 
@@ -724,7 +762,8 @@ public final class SettingsViewModel: ObservableObject {
             active: active,
             candidate: candidate,
             updatePolicy: state.runtimeState.updatePolicy,
-            channel: state.runtimeState.channel
+            channel: state.runtimeState.channel,
+            profile: state.appProfile
         )
         DshStateManager.shared.update { state in
             state.runtimeState = transaction
@@ -969,6 +1008,13 @@ public final class SettingsViewModel: ObservableObject {
               !isOperatingPlugin,
               !isUpdatingRuntime,
               !isInstallingVersion else { return }
+
+        let state = DshStateManager.shared.current
+        if state.runtimeState.pending != nil,
+           profile != state.runtimeState.profile {
+            alertMessage = "Runtime 回滚尚未完成，只能使用 \(state.runtimeState.profile.rawValue) Profile；为保护 Profile 数据，暂不允许切换。"
+            return
+        }
 
         let previous = appProfile
         let leavingSharedWeb = previous == .web && profile == .desktop

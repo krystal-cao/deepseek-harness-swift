@@ -41,7 +41,7 @@ test("Swift ProcessIO rejects a conflicting second ready URL", () => {
     });
     assert.equal(compile.status, 0, compile.stderr || compile.stdout);
 
-    const run = spawnSync(binaryPath, ["--conflict"], { encoding: "utf8", timeout: 10000 });
+    const run = spawnSync(binaryPath, ["--conflict", "--late-wait"], { encoding: "utf8", timeout: 10000 });
     assert.equal(run.status, 0, run.stderr || run.stdout);
     assert.match(run.stdout, /endpoint and redaction harness passed/);
   } finally {

@@ -16,6 +16,7 @@ struct ProcessIOHarness {
         let cookieSecret = "cookie-secret"
         let authorizationSecret = "authorization-secret"
         let conflict = CommandLine.arguments.contains("--conflict")
+        let lateWait = CommandLine.arguments.contains("--late-wait")
 
         require(DshRuntimeAuthContract.expectedMode(for: "0.1.1-rc.2") == .legacy, "rc.2 contract must be legacy")
         require(DshRuntimeAuthContract.expectedMode(for: "0.1.2-alpha.2") == .browserTokenCookie, "alpha.2 contract must use token-cookie auth")
@@ -93,6 +94,9 @@ struct ProcessIOHarness {
         }
 
         if conflict {
+            if lateWait {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
             do {
                 _ = try await io.waitForReady(timeout: 2)
                 require(false, "conflicting ready URLs must fail")

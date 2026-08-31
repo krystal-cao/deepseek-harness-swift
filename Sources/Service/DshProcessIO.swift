@@ -108,10 +108,10 @@ public final class DshProcessIO: @unchecked Sendable {
         try await withCheckedThrowingContinuation { continuation in
             var immediateResult: Result<DshWebEndpoint, Error>?
             lock.lock()
-            if let webEndpoint, controlReadyGeneration == expectedGeneration {
-                immediateResult = .success(webEndpoint)
-            } else if let terminalError {
+            if let terminalError {
                 immediateResult = .failure(terminalError)
+            } else if let webEndpoint, controlReadyGeneration == expectedGeneration {
+                immediateResult = .success(webEndpoint)
             } else {
                 readyContinuation = continuation
                 let timeoutTask = DispatchWorkItem { [weak self] in
@@ -238,6 +238,10 @@ public final class DshProcessIO: @unchecked Sendable {
                     return
                 }
                 lock.lock()
+                guard terminalError == nil else {
+                    lock.unlock()
+                    return
+                }
                 let isConflict = webEndpoint != nil && webEndpoint != endpoint
                 if !isConflict { webEndpoint = endpoint }
                 lock.unlock()
@@ -258,6 +262,10 @@ public final class DshProcessIO: @unchecked Sendable {
            let generationRange = Range(match.range(at: 1), in: normalizedLine),
            let generation = UUID(uuidString: String(normalizedLine[generationRange])) {
             lock.lock()
+            guard terminalError == nil else {
+                lock.unlock()
+                return
+            }
             controlReadyGeneration = generation
             lock.unlock()
             if generation != expectedGeneration {
@@ -280,6 +288,10 @@ public final class DshProcessIO: @unchecked Sendable {
             var continuation: CheckedContinuation<Void, Error>?
             var result: Result<Void, Error> = .success(())
             lock.lock()
+            guard terminalError == nil else {
+                lock.unlock()
+                return
+            }
             policyAcks[revision] = (generation, enabled, exposure)
             continuation = policyContinuations.removeValue(forKey: revision)
             let expectedEnabled = policyExpectations.removeValue(forKey: revision)
@@ -300,6 +312,7 @@ public final class DshProcessIO: @unchecked Sendable {
     private func resolveReadyIfPossible() {
         lock.lock()
         guard !readySettled,
+              terminalError == nil,
               let webEndpoint,
               controlReadyGeneration == expectedGeneration,
               let continuation = readyContinuation else {

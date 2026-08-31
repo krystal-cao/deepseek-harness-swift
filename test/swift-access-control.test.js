@@ -120,6 +120,8 @@ test('LAN access uses a separate authenticated HTTP ingress while the DSH server
   assert.match(LAN_INGRESS, /RENDERER_COOKIE_NAME/)
   assert.match(LAN_INGRESS, /backendHeaders/)
   assert.match(LAN_INGRESS, /createUpstreamSessionBroker/)
+  assert.match(LAN_INGRESS, /broker\.trackSocket\(request\.socket, credential\.browserToken\)/)
+  assert.match(LAN_INGRESS, /proxyRequest\.once\("socket", \(socket\) => broker\.trackSocket\(socket, credential\.browserToken\)\)/)
   assert.match(LAN_INGRESS, /dsh-auth-/)
   assert.match(HOST_BROKER, /cookiesFor/)
   assert.match(HOST_BROKER, /exchangeOverLoopback/)
