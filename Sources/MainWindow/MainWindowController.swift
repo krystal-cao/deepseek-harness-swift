@@ -232,6 +232,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                 _ = try await withRuntimeOperation {
                     let session = try await self.restartDshServiceDuringOperation()
                     print("[MainWindowController] DSH service ready at \(session.originURL)")
+                    SettingsViewModel.shared.refreshPlugins()
                     await SettingsViewModel.shared.recordHealthyRuntimeStart()
                     await SettingsViewModel.shared.finalizeRecoveredRuntimeAfterSuccessfulStart()
                     return session
@@ -356,6 +357,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             try await verifyRuntimeHealth(session: authenticatedSession, upstreamCookies: upstreamCookies)
             return authenticatedSession
         } catch {
+            serviceSession = nil
+            pendingWebUINavigation = nil
+            webUIReadinessGeneration &+= 1
             DshService.shared.stop()
             throw error
         }

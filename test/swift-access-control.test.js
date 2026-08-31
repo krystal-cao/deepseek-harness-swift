@@ -14,6 +14,7 @@ const UPSTREAM_COOKIE_SOURCE = read('../Sources/MainWindow/DshUpstreamCookieStor
 const WINDOW_SOURCE = read('../Sources/MainWindow/MainWindowController.swift')
 const STATE_SOURCE = read('../Sources/State/DshState.swift')
 const SETTINGS_SOURCE = read('../Sources/SettingsUI/SettingsViewModel.swift')
+const APP_SOURCE = read('../Sources/AppDelegate.swift')
 const PLUGIN_SOURCE = read('../Sources/Plugins/DshPluginManager.swift')
 const PROJECT_SOURCE = read('../DSH.xcodeproj/project.pbxproj')
 const HOST_PACKAGE = read('../assets/dsh-desktop-host/package.json')
@@ -171,6 +172,12 @@ test('native health probes use isolated explicit credentials and bounded same-or
 
 test('first launch bootstraps the canonical profile and installs the host before DSH starts', () => {
   assert.match(PLUGIN_SOURCE, /bootstrapWebProfileManifestIfMissing/)
+  assert.match(PLUGIN_SOURCE, /ensureManagedProfileWorkspaceConfiguration/)
+  assert.match(PLUGIN_SOURCE, /pnpm-workspace\.yaml/)
+  assert.match(PLUGIN_SOURCE, /packages:\\n  - \./)
+  assert.match(PLUGIN_SOURCE, /nodeLinker: hoisted/)
+  assert.match(PLUGIN_SOURCE, /autoInstallPeers: false/)
+  assert.match(PLUGIN_SOURCE, /Preserve custom settings such as allowBuilds/)
   assert.match(PLUGIN_SOURCE, /"name": "dsh-profile-/)
   assert.match(PLUGIN_SOURCE, /profileDirectory\(for profile: DshAppProfile\)/)
   assert.match(PLUGIN_SOURCE, /activeProfileDirectory/)
@@ -190,6 +197,12 @@ test('first launch bootstraps the canonical profile and installs the host before
   assert.match(PLUGIN_SOURCE, /\"install\",[\s\S]*\"--frozen-lockfile\"/)
   assert.match(PLUGIN_SOURCE, /profileDependenciesNeedInstall/)
   assert.match(WINDOW_SOURCE, /ensureDesktopHostPlugin\(\)[\s\S]*repairProfileDependenciesIfNeeded\(\)/)
+  assert.match(PLUGIN_SOURCE, /DshProcessOutputCollector/)
+  assert.match(PLUGIN_SOURCE, /runProcess\(proc, stdout: stdout, stderr: stderr\)/)
+  assert.match(PLUGIN_SOURCE, /supply-chain verification/)
+  assert.match(WINDOW_SOURCE, /SettingsViewModel\.shared\.refreshPlugins\(\)/)
+  assert.match(APP_SOURCE, /let restartItem = appMenu\.addItem\([\s\S]*#selector\(restartService\)/)
+  assert.match(APP_SOURCE, /restartItem\.target = self/)
 })
 
 test('profile repair is scoped, lazy, and provides a manual recovery command', () => {
@@ -216,13 +229,13 @@ test('plugin removal uses pnpm-supported arguments and preserves diagnostics', (
     /public func removePlugin\(name: String\) async throws \{[\s\S]*?\n    \}\n\n    private func updateProfileBundle/
   )?.[0]
   assert.ok(removeBlock)
-  assert.match(removeBlock, /proc\.arguments = \["remove", name, "--reporter=append-only"\]/)
+  assert.match(removeBlock, /proc\.arguments = \["remove", name, "--config\.minimum-release-age=0", "--reporter=append-only"\]/)
   assert.doesNotMatch(removeBlock, /registryArguments\(\)/)
   assert.match(removeBlock, /env\["npm_config_registry"\]/)
   assert.match(removeBlock, /let stdout = Pipe\(\)/)
   assert.match(removeBlock, /let stderr = Pipe\(\)/)
-  assert.match(removeBlock, /processOutput\(stdout: stdout, stderr: stderr\)/)
-  assert.match(removeBlock, /退出码 .*proc\.terminationStatus/)
+  assert.match(removeBlock, /processOutput\(result\)/)
+  assert.match(removeBlock, /退出码 .*result\.status/)
 })
 
 test('the upstream webserver is replaced and all request boundaries share the fence', () => {

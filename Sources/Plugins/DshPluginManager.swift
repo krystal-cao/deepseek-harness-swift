@@ -38,6 +38,61 @@ public struct DshProfileSnapshotProgress: Sendable {
     }
 }
 
+private struct DshProcessExecutionResult: Sendable {
+    let status: Int32
+    let stdout: Data
+    let stderr: Data
+}
+
+/// Drain pnpm's pipes while it is running. Waiting for the process before
+/// reading its output can deadlock once pnpm fills the OS pipe buffer during
+/// supply-chain verification.
+private final class DshProcessOutputCollector: @unchecked Sendable {
+    private let stdoutPipe: Pipe?
+    private let stderrPipe: Pipe?
+    private let group = DispatchGroup()
+    private let lock = NSLock()
+    private var stdoutData = Data()
+    private var stderrData = Data()
+
+    init(stdout: Pipe?, stderr: Pipe?) {
+        self.stdoutPipe = stdout
+        self.stderrPipe = stderr
+    }
+
+    func start() {
+        startReading(stdoutPipe, isStdout: true)
+        startReading(stderrPipe, isStdout: false)
+    }
+
+    func wait() {
+        group.wait()
+    }
+
+    func result() -> (stdout: Data, stderr: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (stdoutData, stderrData)
+    }
+
+    private func startReading(_ pipe: Pipe?, isStdout: Bool) {
+        guard let pipe else { return }
+        group.enter()
+        let handle = pipe.fileHandleForReading
+        DispatchQueue.global(qos: .utility).async { [self] in
+            defer { group.leave() }
+            let data = handle.readDataToEndOfFile()
+            lock.lock()
+            if isStdout {
+                stdoutData = data
+            } else {
+                stderrData = data
+            }
+            lock.unlock()
+        }
+    }
+}
+
 public final class DshPluginManager {
     public static let shared = DshPluginManager()
 
@@ -65,6 +120,7 @@ public final class DshPluginManager {
         "@deepseek-ai/dsh-base",
         "@deepseek-ai/dsh-web-app"
     ]
+    private static let profileWorkspaceFileName = "pnpm-workspace.yaml"
     private static let webProfileSnapshotDirectoryName = "dsh-runtime-profile-snapshots"
     private static let missingProfileMarkerName = ".profile-was-missing"
 
@@ -495,6 +551,7 @@ public final class DshPluginManager {
         guard FileManager.default.fileExists(atPath: profileDir.appendingPathComponent("package.json").path) else {
             return [:]
         }
+        try ensureManagedProfileWorkspaceConfiguration(at: profileDir)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
@@ -509,10 +566,8 @@ public final class DshPluginManager {
         proc.standardOutput = pipe
         proc.standardError = FileHandle.nullDevice
 
-        try proc.run()
-        proc.waitUntilExit()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let result = try await runProcess(proc, stdout: pipe)
+        let data = result.stdout
         guard !data.isEmpty,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return [:]
@@ -530,7 +585,7 @@ public final class DshPluginManager {
     }
 
     /// Add a plugin by name or npm specifier.
-    public func addPlugin(spec: String) async throws {
+    public func addPlugin(spec: String, ignoringMinimumReleaseAge: Bool = false) async throws {
         if let packageName = packageName(from: spec),
            Self.internalPluginDependencyNames.contains(packageName) {
             throw NSError(
@@ -552,25 +607,49 @@ public final class DshPluginManager {
 
         let profileDir = Self.activeProfileDirectory
         try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
+        try bootstrapWebProfileManifestIfMissing()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["add", spec] + registryArguments() + ["--reporter=append-only"]
+        var arguments = ["add", spec] + registryArguments()
+        if ignoringMinimumReleaseAge {
+            arguments.append("--config.minimum-release-age=0")
+        }
+        arguments.append("--reporter=append-only")
+        proc.arguments = arguments
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
         proc.environment = env
 
-        try proc.run()
-        proc.waitUntilExit()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
 
-        guard proc.terminationStatus == 0 else {
-            throw NSError(domain: "DshPluginManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "安装插件 \(spec) 失败（退出码 \(proc.terminationStatus)）"])
+        let result = try await runProcess(proc, stdout: stdout, stderr: stderr)
+
+        guard result.status == 0 else {
+            let detail = processOutput(result)
+            throw NSError(domain: "DshPluginManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "安装插件 \(spec) 失败（退出码 \(result.status)）\(detail)"])
         }
         if let packageName = packageName(from: spec) {
             try updateProfileBundle(packageName, removing: false)
         }
+    }
+
+    /// The UI uses this marker to offer a one-time opt-in retry. Keep the
+    /// policy override scoped to the requested install instead of changing
+    /// global pnpm configuration.
+    public static func isMinimumReleaseAgeViolation(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        let messages = [
+            error.localizedDescription,
+            nsError.userInfo[NSLocalizedDescriptionKey] as? String,
+            nsError.userInfo[NSLocalizedFailureReasonErrorKey] as? String
+        ].compactMap { $0 }
+        return messages.contains { $0.contains("MINIMUM_RELEASE_AGE_VIOLATION") }
     }
 
     /// Update a specific plugin to its latest version.
@@ -595,6 +674,7 @@ public final class DshPluginManager {
         }
 
         let profileDir = Self.activeProfileDirectory
+        try ensureManagedProfileWorkspaceConfiguration(at: profileDir)
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
@@ -608,12 +688,11 @@ public final class DshPluginManager {
         let stderr = Pipe()
         proc.standardOutput = stdout
         proc.standardError = stderr
-        try proc.run()
-        proc.waitUntilExit()
+        let result = try await runProcess(proc, stdout: stdout, stderr: stderr)
 
-        guard proc.terminationStatus == 0 else {
-            let detail = processOutput(stdout: stdout, stderr: stderr)
-            throw NSError(domain: "DshPluginManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "更新插件 \(name) 失败（退出码 \(proc.terminationStatus)）\(detail)"])
+        guard result.status == 0 else {
+            let detail = processOutput(result)
+            throw NSError(domain: "DshPluginManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "更新插件 \(name) 失败（退出码 \(result.status)）\(detail)"])
         }
     }
 
@@ -633,6 +712,7 @@ public final class DshPluginManager {
             .filter { !$0.isManaged && !$0.isLocal }
             .map(\.name)
         guard !pluginNames.isEmpty else { return }
+        try ensureManagedProfileWorkspaceConfiguration(at: profileDir)
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
@@ -643,11 +723,15 @@ public final class DshPluginManager {
         env["DSH_NODE_BIN"] = node
         proc.environment = env
 
-        try proc.run()
-        proc.waitUntilExit()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+        let result = try await runProcess(proc, stdout: stdout, stderr: stderr)
 
-        guard proc.terminationStatus == 0 else {
-            throw NSError(domain: "DshPluginManager", code: -4, userInfo: [NSLocalizedDescriptionKey: "批量更新插件失败"])
+        guard result.status == 0 else {
+            let detail = processOutput(result)
+            throw NSError(domain: "DshPluginManager", code: -4, userInfo: [NSLocalizedDescriptionKey: "批量更新插件失败（退出码 \(result.status)）\(detail)"])
         }
     }
 
@@ -673,6 +757,7 @@ public final class DshPluginManager {
         }
 
         let profileDir = Self.activeProfileDirectory
+        try bootstrapWebProfileManifestIfMissing()
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
@@ -680,7 +765,7 @@ public final class DshPluginManager {
         // only operates on the existing lockfile, so keep the registry in
         // the environment for any incidental resolution instead of passing
         // it as an unsupported command-specific option.
-        proc.arguments = ["remove", name, "--reporter=append-only"]
+        proc.arguments = ["remove", name, "--config.minimum-release-age=0", "--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -694,15 +779,14 @@ public final class DshPluginManager {
         proc.standardOutput = stdout
         proc.standardError = stderr
 
-        try proc.run()
-        proc.waitUntilExit()
+        let result = try await runProcess(proc, stdout: stdout, stderr: stderr)
 
-        guard proc.terminationStatus == 0 else {
-            let detail = processOutput(stdout: stdout, stderr: stderr)
+        guard result.status == 0 else {
+            let detail = processOutput(result)
             throw NSError(
                 domain: "DshPluginManager",
                 code: -6,
-                userInfo: [NSLocalizedDescriptionKey: "卸载插件 \(name) 失败（退出码 \(proc.terminationStatus)）\(detail)"]
+                userInfo: [NSLocalizedDescriptionKey: "卸载插件 \(name) 失败（退出码 \(result.status)）\(detail)"]
             )
         }
         try updateProfileBundle(name, removing: true)
@@ -784,14 +868,13 @@ public final class DshPluginManager {
             proc.standardOutput = stdout
             proc.standardError = stderr
 
-            try proc.run()
-            proc.waitUntilExit()
-            guard proc.terminationStatus == 0 else {
-                let detail = processOutput(stdout: stdout, stderr: stderr)
+            let result = try await runProcess(proc, stdout: stdout, stderr: stderr)
+            guard result.status == 0 else {
+                let detail = processOutput(result)
                 throw NSError(
                     domain: "DshPluginManager",
                     code: -18,
-                    userInfo: [NSLocalizedDescriptionKey: "清理 web Profile 桥接依赖失败（退出码 \(proc.terminationStatus)）\(detail)"]
+                    userInfo: [NSLocalizedDescriptionKey: "清理 web Profile 桥接依赖失败（退出码 \(result.status)）\(detail)"]
                 )
             }
         }
@@ -961,9 +1044,36 @@ public final class DshPluginManager {
         return (parentSteps + targetSteps).joined(separator: "/")
     }
 
-    private func processOutput(stdout: Pipe, stderr: Pipe) -> String {
-        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    private func runProcess(
+        _ proc: Process,
+        stdout: Pipe? = nil,
+        stderr: Pipe? = nil
+    ) async throws -> DshProcessExecutionResult {
+        let collector = DshProcessOutputCollector(stdout: stdout, stderr: stderr)
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                do {
+                    proc.standardInput = FileHandle.nullDevice
+                    try proc.run()
+                    collector.start()
+                    proc.waitUntilExit()
+                    collector.wait()
+                    let output = collector.result()
+                    continuation.resume(returning: DshProcessExecutionResult(
+                        status: proc.terminationStatus,
+                        stdout: output.stdout,
+                        stderr: output.stderr
+                    ))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func processOutput(_ result: DshProcessExecutionResult) -> String {
+        let out = String(data: result.stdout, encoding: .utf8) ?? ""
+        let err = String(data: result.stderr, encoding: .utf8) ?? ""
         let detail = [out, err]
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -987,6 +1097,90 @@ public final class DshPluginManager {
         return version
     }
 
+    /// Keep the application-owned desktop Profile compatible with pnpm's
+    /// DSH workspace defaults. The Web profile is shared with the terminal
+    /// CLI, so it is intentionally left untouched here.
+    private func ensureManagedProfileWorkspaceConfiguration(at profileDir: URL) throws {
+        guard DshStateManager.shared.current.appProfile == .desktop else { return }
+        try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
+
+        let workspaceURL = profileDir.appendingPathComponent(Self.profileWorkspaceFileName)
+        let canonical = """
+        packages:
+          - .
+
+        nodeLinker: hoisted
+        autoInstallPeers: false
+        """
+
+        guard FileManager.default.fileExists(atPath: workspaceURL.path) else {
+            try canonical.write(to: workspaceURL, atomically: true, encoding: .utf8)
+            return
+        }
+
+        guard let data = try? Data(contentsOf: workspaceURL),
+              let source = String(data: data, encoding: .utf8) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -23,
+                userInfo: [NSLocalizedDescriptionKey: "无法读取 Desktop Profile 的 pnpm workspace 配置"]
+            )
+        }
+
+        // Preserve custom settings such as allowBuilds and
+        // minimumReleaseAgeExclude. Only repair the DSH workspace invariants
+        // that affect peer resolution and the profile package layout.
+        var updated = source
+        if !Self.hasTopLevelWorkspaceKey("packages", in: updated) {
+            updated = Self.appendWorkspaceText("packages:\n  - .", to: updated)
+        }
+        updated = Self.setTopLevelWorkspaceValue("nodeLinker", value: "hoisted", in: updated)
+        updated = Self.setTopLevelWorkspaceValue("autoInstallPeers", value: "false", in: updated)
+
+        guard updated != source else { return }
+        try updated.write(to: workspaceURL, atomically: true, encoding: .utf8)
+    }
+
+    private static func hasTopLevelWorkspaceKey(_ key: String, in source: String) -> Bool {
+        source.components(separatedBy: "\n").contains { line in
+            !line.hasPrefix(" ") &&
+            !line.hasPrefix("\t") &&
+            line.hasPrefix("\(key):")
+        }
+    }
+
+    private static func setTopLevelWorkspaceValue(
+        _ key: String,
+        value: String,
+        in source: String
+    ) -> String {
+        var lines = source.components(separatedBy: "\n")
+        if let index = lines.firstIndex(where: { line in
+            !line.hasPrefix(" ") &&
+            !line.hasPrefix("\t") &&
+            line.hasPrefix("\(key):")
+        }) {
+            lines[index] = "\(key): \(value)"
+            return lines.joined(separator: "\n")
+        }
+        return appendWorkspaceText("\(key): \(value)", to: source)
+    }
+
+    private static func appendWorkspaceText(_ text: String, to source: String) -> String {
+        var result = source
+        if !result.isEmpty && !result.hasSuffix("\n") {
+            result += "\n"
+        }
+        if !result.isEmpty && !result.hasSuffix("\n\n") {
+            result += "\n"
+        }
+        result += text
+        if !result.hasSuffix("\n") {
+            result += "\n"
+        }
+        return result
+    }
+
     /// Create the canonical selected-profile manifest before pnpm is invoked.
     ///
     /// DSH normally creates this file during its first boot. That ordering is
@@ -998,6 +1192,7 @@ public final class DshPluginManager {
         let selectedProfile = DshStateManager.shared.current.appProfile
         let profileDir = Self.activeProfileDirectory
         try FileManager.default.createDirectory(at: profileDir, withIntermediateDirectories: true)
+        try ensureManagedProfileWorkspaceConfiguration(at: profileDir)
         let packageURL = profileDir.appendingPathComponent("package.json")
 
         if !FileManager.default.fileExists(atPath: packageURL.path) {
@@ -1171,15 +1366,17 @@ public final class DshPluginManager {
         env["DSH_NODE_BIN"] = node
         proc.environment = env
 
-        guard (try? proc.run()) != nil else {
+        let result: DshProcessExecutionResult
+        do {
+            result = try await runProcess(proc, stdout: stdout, stderr: stderr)
+        } catch {
             throw NSError(domain: "DshPluginManager", code: -13, userInfo: [NSLocalizedDescriptionKey: "无法启动 pnpm 安装内置桥接插件"])
         }
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
+        guard result.status == 0 else {
             throw NSError(
                 domain: "DshPluginManager",
                 code: -14,
-                userInfo: [NSLocalizedDescriptionKey: "安装内置桥接插件失败（退出码 \(proc.terminationStatus)）\(processOutput(stdout: stdout, stderr: stderr))"]
+                userInfo: [NSLocalizedDescriptionKey: "安装内置桥接插件失败（退出码 \(result.status)）\(processOutput(result))"]
             )
         }
 
@@ -1213,6 +1410,7 @@ public final class DshPluginManager {
             return false
         }
         let profileDir = Self.activeProfileDirectory
+        try ensureManagedProfileWorkspaceConfiguration(at: profileDir)
         let packageURL = profileDir.appendingPathComponent("package.json")
         let lockfileURL = profileDir.appendingPathComponent("pnpm-lock.yaml")
         guard FileManager.default.fileExists(atPath: lockfileURL.path) else {
@@ -1260,20 +1458,22 @@ public final class DshPluginManager {
         env["DSH_NODE_BIN"] = node
         proc.environment = env
 
-        guard (try? proc.run()) != nil else {
+        let result: DshProcessExecutionResult
+        do {
+            result = try await runProcess(proc, stdout: stdout, stderr: stderr)
+        } catch {
             throw NSError(
                 domain: "DshPluginManager",
                 code: -20,
                 userInfo: [NSLocalizedDescriptionKey: "无法启动 Desktop Profile 依赖修复"]
             )
         }
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else {
-            let detail = processOutput(stdout: stdout, stderr: stderr)
+        guard result.status == 0 else {
+            let detail = processOutput(result)
             throw NSError(
                 domain: "DshPluginManager",
                 code: -21,
-                userInfo: [NSLocalizedDescriptionKey: "Desktop Profile 依赖修复失败（退出码 \(proc.terminationStatus)）。如果需要手动修复，请执行：dsh plugin --profile desktop install --config.minimum-release-age=0\(detail)"]
+                userInfo: [NSLocalizedDescriptionKey: "Desktop Profile 依赖修复失败（退出码 \(result.status)）。如果需要手动修复，请执行：dsh plugin --profile desktop install --config.minimum-release-age=0\(detail)"]
             )
         }
 

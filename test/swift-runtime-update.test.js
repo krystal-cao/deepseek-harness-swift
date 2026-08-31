@@ -7,6 +7,7 @@ const STATE_SOURCE = read('../Sources/State/DshState.swift')
 const SEMVER_SOURCE = read('../Sources/Versions/DshSemanticVersion.swift')
 const VERSION_MANAGER_SOURCE = read('../Sources/Versions/DshVersionManager.swift')
 const SETTINGS_SOURCE = read('../Sources/SettingsUI/SettingsViewModel.swift')
+const SETTINGS_VIEW_SOURCE = read('../Sources/SettingsUI/SettingsView.swift')
 const VERSIONS_VIEW_SOURCE = read('../Sources/SettingsUI/VersionsTabView.swift')
 const GENERAL_SOURCE = read('../Sources/SettingsUI/GeneralTabView.swift')
 const PLUGIN_SOURCE = read('../Sources/Plugins/DshPluginManager.swift')
@@ -137,6 +138,19 @@ test('the running Runtime channel is independent from the update-channel picker'
   )
   assert.match(runtimeCard, /activeChannelName/)
   assert.doesNotMatch(runtimeCard, /channelName/)
+})
+
+test('plugin install asks before bypassing the minimum release age policy', () => {
+  assert.match(PLUGIN_SOURCE, /public func addPlugin\(spec: String, ignoringMinimumReleaseAge: Bool = false\)/)
+  assert.match(PLUGIN_SOURCE, /MINIMUM_RELEASE_AGE_VIOLATION/)
+  assert.match(PLUGIN_SOURCE, /if ignoringMinimumReleaseAge[\s\S]*--config\.minimum-release-age=0/)
+  assert.match(PLUGIN_SOURCE, /let stdout = Pipe\(\)[\s\S]*let stderr = Pipe\(\)[\s\S]*processOutput\(result\)/)
+  assert.match(SETTINGS_SOURCE, /pendingPluginInstallSpec/)
+  assert.match(SETTINGS_SOURCE, /confirmPendingPluginInstall\(\)/)
+  assert.match(SETTINGS_SOURCE, /isMinimumReleaseAgeViolation\(error\)/)
+  assert.match(SETTINGS_VIEW_SOURCE, /confirmationDialog\(/)
+  assert.match(SETTINGS_VIEW_SOURCE, /继续安装插件？/)
+  assert.match(SETTINGS_SOURCE, /不会修改全局 pnpm 配置/)
 })
 
 test('runtime confirmation waits for the rendered Web UI after navigation', () => {

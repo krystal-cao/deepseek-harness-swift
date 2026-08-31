@@ -53,10 +53,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // 1. App Menu (DSH)
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "关于 DSH", action: #selector(openAbout), keyEquivalent: "")
+        let aboutItem = appMenu.addItem(withTitle: "关于 DSH", action: #selector(openAbout), keyEquivalent: "")
+        aboutItem.target = self
         appMenu.addItem(NSMenuItem.separator())
-        appMenu.addItem(withTitle: "设置与版本管理...", action: #selector(openSettings), keyEquivalent: ",")
-        appMenu.addItem(withTitle: "重启 DSH 服务", action: #selector(restartService), keyEquivalent: "r")
+        let settingsItem = appMenu.addItem(withTitle: "设置与版本管理...", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        let restartItem = appMenu.addItem(withTitle: "重启 DSH 服务", action: #selector(restartService), keyEquivalent: "r")
+        restartItem.target = self
 
         let checkForUpdatesItem = NSMenuItem(
             title: "检查更新…",
@@ -127,7 +130,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // 5. Help Menu
         let helpMenuItem = NSMenuItem()
         let helpMenu = NSMenu(title: "帮助")
-        helpMenu.addItem(withTitle: "DSH 帮助文档与源码", action: #selector(openHelp), keyEquivalent: "")
+        let helpItem = helpMenu.addItem(withTitle: "DSH 帮助文档与源码", action: #selector(openHelp), keyEquivalent: "")
+        helpItem.target = self
         helpMenuItem.submenu = helpMenu
         mainMenu.addItem(helpMenuItem)
 

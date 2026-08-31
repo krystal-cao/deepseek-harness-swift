@@ -64,6 +64,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var isOperatingPlugin: Bool = false
     @Published public var isSwitchingProfile: Bool = false
     @Published public var operatingPluginName: String? = nil
+    @Published public private(set) var pendingPluginInstallSpec: String? = nil
     @Published public var pluginStatusMessage: String? = nil
     @Published public var alertMessage: String? = nil
 
@@ -201,6 +202,7 @@ public final class SettingsViewModel: ObservableObject {
                     self.outdatedPluginsMap.removeValue(forKey: name)
                     self.refreshPlugins()
                     try await self.restartDshServiceDuringOperationAndWait()
+                    self.refreshPlugins()
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -226,6 +228,7 @@ public final class SettingsViewModel: ObservableObject {
                     self.outdatedPluginsMap.removeAll()
                     self.refreshPlugins()
                     try await self.restartDshServiceDuringOperationAndWait()
+                    self.refreshPlugins()
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -844,25 +847,55 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func addPlugin(spec: String) {
-        guard !isOperatingPlugin, !isSwitchingProfile, !spec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard pendingPluginInstallSpec == nil else { return }
+        startPluginInstall(spec: spec, ignoringMinimumReleaseAge: false)
+    }
+
+    public func confirmPendingPluginInstall() {
+        guard let spec = pendingPluginInstallSpec else { return }
+        pendingPluginInstallSpec = nil
+        startPluginInstall(spec: spec, ignoringMinimumReleaseAge: true)
+    }
+
+    public func cancelPendingPluginInstall() {
+        pendingPluginInstallSpec = nil
+    }
+
+    public var pendingPluginInstallMessage: String? {
+        guard let spec = pendingPluginInstallSpec else { return nil }
+        return "安装插件 \(spec) 时，npm 检测到依赖版本发布时间过近。继续安装将仅对本次操作使用 --config.minimum-release-age=0，不会修改全局 pnpm 配置。"
+    }
+
+    private func startPluginInstall(spec: String, ignoringMinimumReleaseAge: Bool) {
+        let trimmedSpec = spec.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isOperatingPlugin, !isSwitchingProfile, !trimmedSpec.isEmpty else { return }
         isOperatingPlugin = true
         clearPluginStatus()
-        operatingPluginName = "正在安装插件 \(spec)…"
+        operatingPluginName = "正在安装插件 \(trimmedSpec)…"
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
-                    try await DshPluginManager.shared.addPlugin(spec: spec)
+                    try await DshPluginManager.shared.addPlugin(
+                        spec: trimmedSpec,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+                    )
                     self.refreshPlugins()
                     try await self.restartDshServiceDuringOperationAndWait()
+                    self.refreshPlugins()
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.showPluginStatus("插件 \(spec) 安装成功，服务已重启")
+                self.showPluginStatus("插件 \(trimmedSpec) 安装成功，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                if !ignoringMinimumReleaseAge,
+                   DshPluginManager.isMinimumReleaseAgeViolation(error) {
+                    self.pendingPluginInstallSpec = trimmedSpec
+                    return
+                }
                 let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-                self.alertMessage = message.isEmpty ? "安装插件 \(spec) 失败" : message
+                self.alertMessage = message.isEmpty ? "安装插件 \(trimmedSpec) 失败" : message
             }
         }
     }
@@ -879,6 +912,7 @@ public final class SettingsViewModel: ObservableObject {
                     self.outdatedPluginsMap.removeValue(forKey: name)
                     self.refreshPlugins()
                     try await self.restartDshServiceDuringOperationAndWait()
+                    self.refreshPlugins()
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -1085,9 +1119,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func restartDshService() {
-        Task {
-            MainWindowController.shared.startAndLoadDsh()
-        }
+        MainWindowController.shared.startAndLoadDsh()
     }
 
     private func restartDshServiceAndWait() async throws {

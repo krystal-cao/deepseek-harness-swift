@@ -171,6 +171,27 @@ public struct SettingsView: View {
                     dismissButton: .default(Text("好的"))
                 )
             }
+            .confirmationDialog(
+                "继续安装插件？",
+                isPresented: Binding(
+                    get: { viewModel.pendingPluginInstallSpec != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            viewModel.cancelPendingPluginInstall()
+                        }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("继续安装") {
+                    viewModel.confirmPendingPluginInstall()
+                }
+                Button("取消", role: .cancel) {
+                    viewModel.cancelPendingPluginInstall()
+                }
+            } message: {
+                Text(viewModel.pendingPluginInstallMessage ?? "")
+            }
     }
 
     private var currentPanel: SettingsPanel {
