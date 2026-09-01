@@ -286,6 +286,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
 
     /// Called by a caller that already holds `withRuntimeOperation`.
     public func restartDshServiceDuringOperation() async throws -> DshServiceSession {
+        // Profile recovery and snapshot operations must never race a Node
+        // child left behind by a force-quit. This is intentionally before any
+        // package or snapshot mutation below.
+        try await DshService.shared.prepareForProfileMutation()
+
         let runtimeState = DshStateManager.shared.current.runtimeState
         let appProfile = DshStateManager.shared.current.appProfile
         if runtimeState.phase == .rollingBack,
@@ -987,7 +992,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         runtimeReloadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.runtimeReloadTask = nil }
-            await self.reloadDshWithAuthenticationRecovery()
+            do {
+                try await self.withRuntimeOperation {
+                    await self.reloadDshWithAuthenticationRecovery()
+                }
+            } catch {
+                self.revealWindow()
+                self.showErrorAlert(error.localizedDescription)
+            }
         }
     }
 
@@ -1020,7 +1032,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                     // DshService.start() creates a new access generation and
                     // receives a fresh `dsh web:?token=...` URL. The old
                     // bootstrap URL is never retained or replayed.
-                    _ = try await restartDshService()
+                    // The caller already owns runtimeOperationGate. Calling
+                    // the public wrapper here would acquire it a second time
+                    // and deadlock the recovery task.
+                    _ = try await restartDshServiceDuringOperation()
                     return
                 } catch {
                     revealWindow()

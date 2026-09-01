@@ -26,9 +26,10 @@ test('Swift DSH service no longer relies on a delayed SIGKILL that never fires o
 })
 
 test('Swift DSH service reclaims a stale server bound to its port on startup', () => {
-  assert.match(SERVICE_SOURCE, /recycleStaleDshServerIfNeeded\(onPort: actualPort\)/)
+  assert.match(SERVICE_SOURCE, /recycleStaleDshServerIfNeeded\(\)/)
   assert.match(SERVICE_SOURCE, /dsh-service-process\.json/)
-  assert.match(SERVICE_SOURCE, /record\.port == port/)
+  assert.match(SERVICE_SOURCE, /listeningPids\(on: record\.port\)/)
+  assert.doesNotMatch(SERVICE_SOURCE, /record\.port == actualPort/)
   assert.match(SERVICE_SOURCE, /record\.nodePath/)
   assert.match(SERVICE_SOURCE, /processExecutablePath/)
   assert.match(SERVICE_SOURCE, /processStartTime/)

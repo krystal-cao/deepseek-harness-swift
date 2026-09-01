@@ -121,6 +121,35 @@ public final class DshService: @unchecked Sendable {
         return bindResult == 0
     }
 
+    /// Stop this app's current or persisted child before another component
+    /// mutates a Profile on disk. A force-quit can leave the Node child alive
+    /// after the in-memory `ManagedDshProcess` has gone away, so the persisted
+    /// PID/process-group record must be checked before Profile recovery too.
+    ///
+    /// The configured port is also required to be free before returning. This
+    /// prevents an unrelated DSH process sharing the web Profile from racing
+    /// pnpm cleanup when ownership cannot be established safely.
+    public func prepareForProfileMutation() async throws {
+        await startOperationGate.acquire()
+        defer { startOperationGate.release() }
+
+        await stopAndWait()
+
+        let actualPort = DshStateManager.shared.current.dshPort ?? 3080
+        // The persisted record belongs to the previous app-owned process,
+        // not to the current port setting. This must run before checking the
+        // new port so a port change cannot strand the old child.
+        recycleStaleDshServerIfNeeded()
+
+        let deadline = Date().addingTimeInterval(3.0)
+        while !isPortAvailable(actualPort), Date() < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard isPortAvailable(actualPort) else {
+            throw ServiceError.portInUse(actualPort)
+        }
+    }
+
     /// Start or restart the DSH service and return the protected session.
     public func start(port: Int? = nil) async throws -> DshServiceSession {
         await startOperationGate.acquire()
@@ -138,7 +167,7 @@ public final class DshService: @unchecked Sendable {
         // applicationWillTerminate never ran. Reclaim only the process
         // recorded by this app before probing so an orphaned child process
         // never blocks this launch without killing an unrelated DSH instance.
-        recycleStaleDshServerIfNeeded(onPort: actualPort)
+        recycleStaleDshServerIfNeeded()
         let portDeadline = Date().addingTimeInterval(3.0)
         while !isPortAvailable(actualPort), Date() < portDeadline {
             try? await Task.sleep(nanoseconds: 50_000_000)
@@ -347,18 +376,20 @@ public final class DshService: @unchecked Sendable {
         }
     }
 
-    /// Reclaim a port still held by this app's stale DSH web server after a
-    /// hard kill. The record scopes recovery to the exact PID and, when
-    /// available, the exact process group created for this app.
-    private func recycleStaleDshServerIfNeeded(onPort port: Int) {
-        guard !isPortAvailable(port),
-              let record = loadProcessRecord(),
-              record.port == port else { return }
+    /// Reclaim this app's stale DSH web server after a hard kill. The
+    /// persisted record is authoritative for the old process and may point
+    /// to a port that is no longer the current setting.
+    private func recycleStaleDshServerIfNeeded() {
+        guard let record = loadProcessRecord() else { return }
 
-        let listeners = listeningPids(on: port)
-        guard listeners.contains(where: { isRecordedDshServer(pid: $0, record: record) }) else {
-            return
+        let recordedLeaderIsAlive = isRecordedDshServer(
+            pid: pid_t(record.pid),
+            record: record
+        )
+        let recordedListenerIsAlive = listeningPids(on: record.port).contains {
+            isRecordedDshServer(pid: $0, record: record)
         }
+        guard recordedLeaderIsAlive || recordedListenerIsAlive else { return }
 
         terminateRecordedProcess(record)
     }

@@ -19,9 +19,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // Profile switches are persisted separately from Runtime update
             // transactions. Recover them first so a force-quit during a
             // failed web switch can never make startup retry the bad Profile.
-            await SettingsViewModel.shared.recoverPendingProfileSwitch()
-            await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
-            await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
+            // Reclaim an orphaned Node process before any recovery path can
+            // touch package.json, pnpm-lock.yaml, or node_modules.
+            let profileMutationIsSafe: Bool
+            do {
+                try await DshService.shared.prepareForProfileMutation()
+                profileMutationIsSafe = true
+            } catch {
+                profileMutationIsSafe = false
+                print("[AppDelegate] Profile recovery deferred until the DSH port is safe:", error)
+            }
+            if profileMutationIsSafe {
+                await SettingsViewModel.shared.recoverPendingProfileSwitch()
+                await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
+                await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
+            }
             _ = await Task.detached(priority: .utility) {
                 DshVersionManager.shared.cleanupUnreferencedVersions()
             }.value

@@ -62,6 +62,8 @@ test('the app defaults to an isolated desktop Profile and exposes web as an expl
   assert.match(PLUGIN_SOURCE, /--config\.minimum-release-age=0/)
   assert.match(PLUGIN_SOURCE, /dsh-host-webserver/)
   assert.match(SERVICE_SOURCE, /profile: state\.appProfile/)
+  assert.match(SERVICE_SOURCE, /public func prepareForProfileMutation\(\) async throws/)
+  assert.match(SERVICE_SOURCE, /terminateRecordedProcess\(record\)/)
   assert.match(HOST_CONTROL, /SUPPORTED_PROFILES = new Set\(\["desktop", "web"\]\)/)
 })
 
@@ -80,7 +82,10 @@ test('Profile switches are recoverable across force-quit and commit only after a
   assert.match(SETTINGS_SOURCE, /Bridge cleanup is app-owned housekeeping|桥接清理是 App 自有清理/)
   assert.match(SETTINGS_SOURCE, /pendingProfileSwitch = cleanupError == nil \? nil : transaction/)
   assert.match(WINDOW_SOURCE, /retryPendingProfileSwitchCleanup\(\)/)
+  assert.match(WINDOW_SOURCE, /try await DshService\.shared\.prepareForProfileMutation\(\)/)
   assert.match(APP_SOURCE, /await SettingsViewModel\.shared\.recoverPendingProfileSwitch\(\)/)
+  assert.match(APP_SOURCE, /await DshService\.shared\.prepareForProfileMutation\(\)/)
+  assert.ok(APP_SOURCE.indexOf('prepareForProfileMutation') < APP_SOURCE.indexOf('recoverPendingProfileSwitch'))
   assert.ok(APP_SOURCE.indexOf('recoverPendingProfileSwitch') < APP_SOURCE.indexOf('MainWindowController.shared.launch'))
 })
 

@@ -184,6 +184,8 @@ test('alpha Runtime health verifies the real WebKit Remote stream and can renew 
   assert.match(WINDOW_SOURCE, /authenticatedCookies\(for: session\)/)
   assert.match(WINDOW_SOURCE, /maxAutomaticAuthenticationRecoveries = 1/)
   assert.match(WINDOW_SOURCE, /restartDshService\(\)/)
+  assert.match(WINDOW_SOURCE, /try await self\.withRuntimeOperation/)
+  assert.match(WINDOW_SOURCE, /restartDshServiceDuringOperation\(\)/)
   assert.match(WINDOW_SOURCE, /authenticationRequired/)
   assert.match(WINDOW_SOURCE, /self\.reloadDsh\(\)/)
   assert.match(UPSTREAM_COOKIE_SOURCE, /public func authenticatedCookies\(for session: DshServiceSession\)/)
