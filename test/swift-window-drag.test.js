@@ -106,6 +106,14 @@ test('Swift titlebar leaves WebKit in charge of every click', () => {
   assert.match(WEB_SHELL_SOURCE, /forMainFrameOnly: true/)
 })
 
+test('Swift traffic lights stay aligned after AppKit lays out the main window', () => {
+  assert.match(MAIN_WINDOW_SOURCE, /trafficLightHorizontalOffset: CGFloat = 7/)
+  assert.match(MAIN_WINDOW_SOURCE, /trafficLightVerticalOffset: CGFloat = -7/)
+  assert.match(MAIN_WINDOW_SOURCE, /trafficLightBaseFrames/)
+  assert.match(MAIN_WINDOW_SOURCE, /public func windowDidBecomeMain\(_ notification: Notification\)/)
+  assert.match(MAIN_WINDOW_SOURCE, /self\?\.adjustTrafficLights\(in: win\)/)
+})
+
 test('Swift bridge carries the complete native window drag lifecycle', () => {
   for (const type of ['windowDragPrepare', 'windowDragStart', 'windowDragMove', 'windowDragEnd']) {
     assert.match(WEB_SHELL_SOURCE, new RegExp(`post\\('${type}'\\)`))

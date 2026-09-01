@@ -122,6 +122,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var downloadStatusBanner: DownloadStatusBanner?
     private let runtimeOperationGate = DshAsyncOperationGate()
     private let runtimeHealthClient = DshRuntimeHealthClient()
+    private var trafficLightBaseFrames: [NSWindow.ButtonType: NSRect] = [:]
+
+    private static let trafficLightHorizontalOffset: CGFloat = 7
+    private static let trafficLightVerticalOffset: CGFloat = -7
 
     private enum RuntimeHealthError: LocalizedError {
         case nonHTTPResponse(String)
@@ -191,11 +195,18 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         win.layoutIfNeeded()
         for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             guard let button = win.standardWindowButton(type) else { continue }
-            var frame = button.frame
-            frame.origin.x += 7
-            frame.origin.y -= 8
+            let baseFrame = trafficLightBaseFrames[type] ?? button.frame
+            trafficLightBaseFrames[type] = baseFrame
+            var frame = baseFrame
+            frame.origin.x += Self.trafficLightHorizontalOffset
+            frame.origin.y += Self.trafficLightVerticalOffset
             button.frame = frame
         }
+    }
+
+    public func windowDidBecomeMain(_ notification: Notification) {
+        guard let win = window else { return }
+        adjustTrafficLights(in: win)
     }
 
     private func setupContentView(in win: NSWindow) {
@@ -867,6 +878,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
             if !win.isVisible {
                 win.alphaValue = 0
                 win.makeKeyAndOrderFront(nil)
+                self?.adjustTrafficLights(in: win)
                 NSApp.activate(ignoringOtherApps: true)
                 NSAnimationContext.runAnimationGroup { ctx in
                     ctx.duration = 0.25
