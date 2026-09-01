@@ -242,7 +242,7 @@ test('the managed host webserver dependency is hidden from user plugin managemen
   assert.match(PLUGIN_SOURCE, /不能直接更新 DSH 内部依赖/)
   assert.match(PLUGIN_SOURCE, /不能直接卸载 DSH 内部依赖/)
   assert.match(PLUGIN_SOURCE, /filter \{ !\$0\.isManaged && !\$0\.isLocal \}/)
-  assert.match(PLUGIN_SOURCE, /proc\.arguments = \["update"\] \+ pluginNames \+ \["--latest"\]/)
+  assert.match(PLUGIN_SOURCE, /var arguments = \["update"\] \+ pluginNames \+ \["--latest"\][\s\S]*proc\.arguments = arguments \+ registryArguments\(\)/)
 })
 
 test('plugin removal uses pnpm-supported arguments and preserves diagnostics', () => {

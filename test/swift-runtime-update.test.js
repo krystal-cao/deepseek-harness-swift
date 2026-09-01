@@ -194,6 +194,40 @@ test('plugin install asks before bypassing the minimum release age policy', () =
   assert.match(SETTINGS_SOURCE, /不会修改全局 pnpm 配置/)
 })
 
+test('plugin update checks use pnpm-compatible registry and release-age handling', () => {
+  const start = PLUGIN_SOURCE.indexOf('public func checkOutdatedPlugins()')
+  const end = PLUGIN_SOURCE.indexOf('    /// Add a plugin by name or npm specifier.', start)
+  const checkSource = PLUGIN_SOURCE.slice(start, end)
+
+  assert.match(checkSource, /"outdated",\s*"--format",\s*"json"/)
+  assert.match(checkSource, /--config\.minimum-release-age=0/)
+  assert.match(checkSource, /env\["npm_config_registry"\]/)
+  assert.match(checkSource, /runProcess\(proc, stdout: stdout, stderr: stderr\)/)
+  assert.match(checkSource, /result\.status == 0 \|\| result\.status == 1/)
+  assert.match(checkSource, /检测插件更新失败（退出码/)
+})
+
+test('plugin updates ask before bypassing the minimum release age policy', () => {
+  assert.match(PLUGIN_SOURCE, /public enum DshPendingPluginUpdate: Equatable, Sendable/)
+  assert.match(PLUGIN_SOURCE, /public func updatePlugin\(name: String, ignoringMinimumReleaseAge: Bool = false\)/)
+  assert.match(PLUGIN_SOURCE, /public func updateAllPlugins\(ignoringMinimumReleaseAge: Bool = false\)/)
+  assert.match(PLUGIN_SOURCE, /var arguments = \["update", name, "--latest"\][\s\S]*if ignoringMinimumReleaseAge[\s\S]*--config\.minimum-release-age=0/)
+  assert.match(PLUGIN_SOURCE, /var arguments = \["update"\] \+ pluginNames \+ \["--latest"\][\s\S]*if ignoringMinimumReleaseAge[\s\S]*--config\.minimum-release-age=0/)
+  assert.match(SETTINGS_SOURCE, /pendingPluginUpdate/)
+  assert.match(SETTINGS_SOURCE, /confirmPendingPluginUpdate\(\)/)
+  assert.match(SETTINGS_SOURCE, /cancelPendingPluginUpdate\(\)/)
+  assert.match(SETTINGS_SOURCE, /pendingPluginUpdateMessage/)
+  assert.match(SETTINGS_SOURCE, /startPluginUpdate\(name: name, ignoringMinimumReleaseAge: false\)/)
+  assert.match(SETTINGS_SOURCE, /startPluginUpdateAll\(ignoringMinimumReleaseAge: false\)/)
+  assert.ok(SETTINGS_SOURCE.includes('正在更新插件（共 \\(count) 个）…'))
+  assert.match(SETTINGS_SOURCE, /插件更新完成，正在重启 DSH 服务…/)
+  assert.ok(!SETTINGS_SOURCE.includes('正在更新插件（0/\\(count)）…'))
+  assert.match(SETTINGS_SOURCE, /if !ignoringMinimumReleaseAge,[\s\S]*isMinimumReleaseAgeViolation\(error\)/)
+  assert.match(SETTINGS_VIEW_SOURCE, /继续更新插件？/)
+  assert.match(SETTINGS_VIEW_SOURCE, /confirmPendingPluginUpdate\(\)/)
+  assert.match(SETTINGS_VIEW_SOURCE, /pendingPluginUpdateMessage/)
+})
+
 test('runtime confirmation waits for the rendered Web UI after navigation', () => {
   assert.match(WINDOW_SOURCE, /try await (?:self\.)?waitForWebUIReady\(\)/)
   assert.match(WINDOW_SOURCE, /try await verifyRuntimeHealth\(session: authenticatedSession, upstreamCookies: upstreamCookies\)/)

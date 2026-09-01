@@ -192,6 +192,27 @@ public struct SettingsView: View {
             } message: {
                 Text(viewModel.pendingPluginInstallMessage ?? "")
             }
+            .confirmationDialog(
+                "继续更新插件？",
+                isPresented: Binding(
+                    get: { viewModel.pendingPluginUpdate != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            viewModel.cancelPendingPluginUpdate()
+                        }
+                    }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("继续更新") {
+                    viewModel.confirmPendingPluginUpdate()
+                }
+                Button("取消", role: .cancel) {
+                    viewModel.cancelPendingPluginUpdate()
+                }
+            } message: {
+                Text(viewModel.pendingPluginUpdateMessage ?? "")
+            }
     }
 
     private var currentPanel: SettingsPanel {

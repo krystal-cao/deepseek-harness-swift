@@ -26,6 +26,11 @@ public struct DshPluginItem: Identifiable, Equatable {
     }
 }
 
+public enum DshPendingPluginUpdate: Equatable, Sendable {
+    case plugin(String)
+    case all
+}
+
 public struct DshProfileSnapshotProgress: Sendable {
     public let phase: String
     public let fraction: Double?
@@ -556,21 +561,59 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["outdated", "--json"] + registryArguments()
+        // pnpm 11's `outdated` command does not accept `--registry` as a
+        // command-specific option. Keep the registry in the environment,
+        // and disable the default 24-hour release-age gate for this read-only
+        // metadata check so a newly published plugin can be reported at once.
+        proc.arguments = [
+            "outdated",
+            "--format", "json",
+            "--config.minimum-release-age=0"
+        ]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
+        env["npm_config_registry"] = DshVersionManager.normalizedRegistry(
+            DshStateManager.shared.current.npmRegistry
+        )
         proc.environment = env
 
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        proc.standardError = FileHandle.nullDevice
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
 
-        let result = try await runProcess(proc, stdout: pipe)
+        let result = try await runProcess(proc, stdout: stdout, stderr: stderr)
         let data = result.stdout
         guard !data.isEmpty,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            guard result.status == 0 else {
+                let detail = processOutput(result)
+                throw NSError(
+                    domain: "DshPluginManager",
+                    code: -9,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "检测插件更新失败（退出码 \(result.status)）\(detail)"
+                    ]
+                )
+            }
             return [:]
+        }
+
+        // pnpm outdated exits with status 1 when it finds at least one
+        // outdated dependency. A valid JSON payload is the authoritative
+        // result, so accept both the clean and the "updates found" statuses.
+        guard result.status == 0 || result.status == 1 else {
+            let detail = processOutput(result)
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -9,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "检测插件更新失败（退出码 \(result.status)）\(detail)"
+                ]
+            )
         }
 
         var outdated: [String: String] = [:]
@@ -653,7 +696,11 @@ public final class DshPluginManager {
     }
 
     /// Update a specific plugin to its latest version.
-    public func updatePlugin(name: String) async throws {
+    ///
+    /// The normal path keeps pnpm's supply-chain release-age policy. The UI
+    /// retries with `ignoringMinimumReleaseAge` only after the user confirms
+    /// the one-time override for a newly published dependency.
+    public func updatePlugin(name: String, ignoringMinimumReleaseAge: Bool = false) async throws {
         guard !Self.internalPluginDependencyNames.contains(name) else {
             throw NSError(
                 domain: "DshPluginManager",
@@ -678,7 +725,11 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["update", name, "--latest"] + registryArguments() + ["--reporter=append-only"]
+        var arguments = ["update", name, "--latest"]
+        if ignoringMinimumReleaseAge {
+            arguments.append("--config.minimum-release-age=0")
+        }
+        proc.arguments = arguments + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node
@@ -697,7 +748,7 @@ public final class DshPluginManager {
     }
 
     /// Update all installed plugins to their latest versions.
-    public func updateAllPlugins() async throws {
+    public func updateAllPlugins(ignoringMinimumReleaseAge: Bool = false) async throws {
         guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
               let node = NodeRuntime.shared.resolveNodeBinary() else {
             throw NSError(domain: "DshPluginManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "缺少 Node 或 pnpm"])
@@ -717,7 +768,11 @@ public final class DshPluginManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: pnpm)
         proc.currentDirectoryURL = profileDir
-        proc.arguments = ["update"] + pluginNames + ["--latest"] + registryArguments() + ["--reporter=append-only"]
+        var arguments = ["update"] + pluginNames + ["--latest"]
+        if ignoringMinimumReleaseAge {
+            arguments.append("--config.minimum-release-age=0")
+        }
+        proc.arguments = arguments + registryArguments() + ["--reporter=append-only"]
 
         var env = NodeRuntime.shared.buildEnvironment()
         env["DSH_NODE_BIN"] = node

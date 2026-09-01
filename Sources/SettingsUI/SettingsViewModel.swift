@@ -70,6 +70,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var isSwitchingProfile: Bool = false
     @Published public var operatingPluginName: String? = nil
     @Published public private(set) var pendingPluginInstallSpec: String? = nil
+    @Published public private(set) var pendingPluginUpdate: DshPendingPluginUpdate? = nil
     @Published public var pluginStatusMessage: String? = nil
     @Published public var alertMessage: String? = nil
 
@@ -297,6 +298,39 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func updatePlugin(name: String) {
+        startPluginUpdate(name: name, ignoringMinimumReleaseAge: false)
+    }
+
+    public func updateAllPlugins() {
+        startPluginUpdateAll(ignoringMinimumReleaseAge: false)
+    }
+
+    public func confirmPendingPluginUpdate() {
+        guard let request = pendingPluginUpdate else { return }
+        pendingPluginUpdate = nil
+        switch request {
+        case .plugin(let name):
+            startPluginUpdate(name: name, ignoringMinimumReleaseAge: true)
+        case .all:
+            startPluginUpdateAll(ignoringMinimumReleaseAge: true)
+        }
+    }
+
+    public func cancelPendingPluginUpdate() {
+        pendingPluginUpdate = nil
+    }
+
+    public var pendingPluginUpdateMessage: String? {
+        guard let request = pendingPluginUpdate else { return nil }
+        switch request {
+        case .plugin(let name):
+            return "更新插件 \(name) 时，npm 检测到依赖版本发布时间过近。继续更新将仅对本次操作使用 --config.minimum-release-age=0，不会修改全局 pnpm 配置。"
+        case .all:
+            return "批量更新插件时，npm 检测到依赖版本发布时间过近。继续更新将仅对本次操作使用 --config.minimum-release-age=0，不会修改全局 pnpm 配置。"
+        }
+    }
+
+    private func startPluginUpdate(name: String, ignoringMinimumReleaseAge: Bool) {
         guard !isOperatingPlugin, !isSwitchingProfile else { return }
         isOperatingPlugin = true
         clearPluginStatus()
@@ -304,7 +338,10 @@ public final class SettingsViewModel: ObservableObject {
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
-                    try await DshPluginManager.shared.updatePlugin(name: name)
+                    try await DshPluginManager.shared.updatePlugin(
+                        name: name,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+                    )
                     self.outdatedPluginsMap.removeValue(forKey: name)
                     self.refreshPlugins()
                     try await self.restartDshServiceDuringOperationAndWait()
@@ -316,23 +353,33 @@ public final class SettingsViewModel: ObservableObject {
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                if !ignoringMinimumReleaseAge,
+                   DshPluginManager.isMinimumReleaseAgeViolation(error) {
+                    self.pendingPluginUpdate = .plugin(name)
+                    return
+                }
                 self.alertMessage = error.localizedDescription
             }
         }
     }
 
-    public func updateAllPlugins() {
+    private func startPluginUpdateAll(ignoringMinimumReleaseAge: Bool) {
         guard !isOperatingPlugin, !isSwitchingProfile else { return }
         isOperatingPlugin = true
         clearPluginStatus()
         let count = installedPlugins.filter(\.hasUpdate).count
-        operatingPluginName = "正在更新插件（0/\(count)）…"
+        operatingPluginName = count > 0
+            ? "正在更新插件（共 \(count) 个）…"
+            : "正在更新插件…"
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
-                    try await DshPluginManager.shared.updateAllPlugins()
+                    try await DshPluginManager.shared.updateAllPlugins(
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+                    )
                     self.outdatedPluginsMap.removeAll()
                     self.refreshPlugins()
+                    self.operatingPluginName = "插件更新完成，正在重启 DSH 服务…"
                     try await self.restartDshServiceDuringOperationAndWait()
                     self.refreshPlugins()
                 }
@@ -342,6 +389,11 @@ public final class SettingsViewModel: ObservableObject {
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                if !ignoringMinimumReleaseAge,
+                   DshPluginManager.isMinimumReleaseAgeViolation(error) {
+                    self.pendingPluginUpdate = .all
+                    return
+                }
                 self.alertMessage = error.localizedDescription
             }
         }
