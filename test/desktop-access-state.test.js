@@ -281,7 +281,7 @@ test('browser URL providers receive the loopback origin and provider failures do
   assert.equal(failedState.browserTokens.size, 0)
 })
 
-test('Browser handoff completes the alpha.2 token exchange without exposing the upstream token in the returned URL', async (t) => {
+test('Browser handoff completes the alpha token exchange without exposing the upstream token in the returned URL', async (t) => {
   const fixture = await createUpstreamAuthFixture({ mode: 'alpha' })
   t.after(() => fixture.close())
   const state = managedState({ ordinaryBrowserEnabled: true })
@@ -702,7 +702,7 @@ test('released broker sockets are removed when the underlying connection later c
   assert.equal(destroyCalls, 0)
 })
 
-test('LAN ingress brokers B plus upstream U against the alpha.2 fixture while exposing only L', async (t) => {
+test('LAN ingress brokers B plus upstream U against the alpha fixture while exposing only L', async (t) => {
   const fixture = await createUpstreamAuthFixture({ mode: 'alpha' })
   t.after(() => fixture.close())
   const state = managedState({ ordinaryBrowserEnabled: true })

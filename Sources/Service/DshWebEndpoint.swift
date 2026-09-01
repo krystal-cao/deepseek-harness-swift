@@ -11,23 +11,11 @@ public enum DshAuthMode: String, Sendable, Equatable {
     case browserTokenCookie
 }
 
-/// Versioned capabilities currently supported by the native shell. This is
-/// deliberately an exact allow-list: a future runtime must add a verified
-/// contract or a structured capability handshake before it can be treated as
-/// compatible with either authentication mode.
-public enum DshRuntimeAuthContract {
-    public static func expectedMode(for runtimeVersion: String) -> DshAuthMode? {
-        switch runtimeVersion {
-        case "0.1.1-rc.2":
-            return .legacy
-        case "0.1.2-alpha.2":
-            return .browserTokenCookie
-        default:
-            return nil
-        }
-    }
-}
-
+/// The ready URL is the Runtime's authentication capability declaration. The
+/// parser below intentionally validates the wire shape rather than the
+/// Runtime version, so a compatible future release can be adopted without an
+/// App update. The subsequent Renderer, anonymous, Browser URL, and health
+/// checks remain the compatibility gate for the selected Runtime.
 public enum DshWebEndpointError: Error, LocalizedError, Sendable, Equatable {
     case invalidScheme
     case invalidHost
@@ -78,7 +66,7 @@ public struct DshWebEndpoint: Sendable, Equatable {
     public let authMode: DshAuthMode
 
     /// Return the same validated session endpoint without retaining the
-    /// one-shot alpha.2 launch URL. The bootstrap URL is intentionally not a
+    /// one-shot alpha launch URL. The bootstrap URL is intentionally not a
     /// long-lived application route because it carries a bearer credential.
     public func withoutBootstrap() -> DshWebEndpoint {
         DshWebEndpoint(originURL: originURL, bootstrapURL: nil, authMode: authMode)

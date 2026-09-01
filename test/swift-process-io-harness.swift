@@ -18,10 +18,6 @@ struct ProcessIOHarness {
         let conflict = CommandLine.arguments.contains("--conflict")
         let lateWait = CommandLine.arguments.contains("--late-wait")
 
-        require(DshRuntimeAuthContract.expectedMode(for: "0.1.1-rc.2") == .legacy, "rc.2 contract must be legacy")
-        require(DshRuntimeAuthContract.expectedMode(for: "0.1.2-alpha.2") == .browserTokenCookie, "alpha.2 contract must use token-cookie auth")
-        require(DshRuntimeAuthContract.expectedMode(for: "future") == nil, "unknown runtime contract must fail closed")
-
         let legacy = try? DshWebEndpoint.parse(
             URL(string: "http://127.0.0.1:3187/")!,
             expectedPort: 3187
@@ -81,7 +77,6 @@ struct ProcessIOHarness {
             stderrPipe: stderrPipe,
             expectedGeneration: generation,
             expectedPort: 3187,
-            expectedAuthMode: .browserTokenCookie,
             secrets: [rendererToken, cookieSecret, authorizationSecret, "percent+secret/="]
         )
         io.start()
@@ -108,7 +103,7 @@ struct ProcessIOHarness {
         } else {
             do {
                 let endpoint = try await io.waitForReady(timeout: 2)
-                require(endpoint.authMode == .browserTokenCookie, "alpha endpoint must use token-cookie mode")
+                require(endpoint.authMode == .browserTokenCookie, "token endpoint must use token-cookie mode")
                 require(endpoint.originURL.absoluteString == "http://127.0.0.1:3187/", "origin must be clean")
                 require(endpoint.bootstrapURL?.absoluteString == "http://127.0.0.1:3187/?token=\(launchToken)", "bootstrap token must be preserved")
             } catch {

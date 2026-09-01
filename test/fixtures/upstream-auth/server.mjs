@@ -29,7 +29,7 @@ function requestHost(request) {
 }
 
 /**
- * A black-box HTTP contract fixture for the observed rc.2/alpha.2 behavior.
+ * A black-box HTTP contract fixture for the observed rc.2/alpha behavior.
  * It intentionally models responses and redirects, rather than importing or
  * copying BrowserAuth implementation code from the runtime package.
  */

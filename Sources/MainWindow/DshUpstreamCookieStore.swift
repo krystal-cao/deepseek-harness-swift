@@ -47,7 +47,7 @@ public final class DshUpstreamCookieStore {
         }
     }
 
-    /// Wait for the cookie issued by alpha.2's token redirect. The preceding
+    /// Wait for the cookie issued by an alpha Runtime's token redirect. The preceding
     /// prepareForNewSession call makes the result a cookie from this startup,
     /// rather than an arbitrary old dsh-auth-* value.
     public func waitForAuthenticatedCookies(
@@ -97,7 +97,7 @@ public final class DshUpstreamCookieStore {
         return true
     }
 
-    /// alpha.2 names the BrowserAuth cookie with the SHA-256 of the exact
+    /// Alpha Runtimes name the BrowserAuth cookie with the SHA-256 of the exact
     /// authority, including the non-default port. This is only a cookie-name
     /// adapter; the signed cookie value remains entirely owned by upstream.
     public static func expectedCookieName(for session: DshServiceSession) throws -> String {

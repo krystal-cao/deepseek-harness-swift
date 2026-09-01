@@ -61,16 +61,19 @@ function upgrade({ port, cookie }) {
   });
 }
 
-test("P0 fixture records the checked rc.2 and alpha.2 package contracts", () => {
+test("P0 fixture records the checked rc.2, alpha.2, and alpha.3 package contracts", () => {
   const contract = JSON.parse(fs.readFileSync(contractPath, "utf8"));
-  assert.deepEqual(contract.fixtures.map(({ runtime }) => runtime), ["0.1.1-rc.2", "0.1.2-alpha.2"]);
+  assert.deepEqual(contract.fixtures.map(({ runtime }) => runtime), ["0.1.1-rc.2", "0.1.2-alpha.2", "0.1.2-alpha.3"]);
   assert.equal(contract.fixtures[0].mode, "legacy");
   assert.equal(contract.fixtures[1].mode, "browserTokenCookie");
+  assert.equal(contract.fixtures[2].mode, "browserTokenCookie");
   assert.match(contract.fixtures[1].dshIntegrity, /^sha512-/);
   assert.match(contract.fixtures[1].connectionIntegrity, /^sha512-/);
+  assert.match(contract.fixtures[2].dshIntegrity, /^sha512-/);
+  assert.match(contract.fixtures[2].connectionIntegrity, /^sha512-/);
 });
 
-test("alpha.2 BrowserAuth is a token redirect followed by an upstream cookie", async (t) => {
+test("alpha BrowserAuth is a token redirect followed by an upstream cookie", async (t) => {
   const fixture = await createUpstreamAuthFixture({ mode: "alpha" });
   t.after(() => fixture.close());
   const expectedCookieName = "dsh-auth-" + createHash("sha256")
@@ -116,7 +119,7 @@ test("alpha.2 BrowserAuth is a token redirect followed by an upstream cookie", a
   assert.match(websocket, /^HTTP\/1\.1 101 Switching Protocols/);
 });
 
-test("alpha.2 rejects invalid or ambiguous token inputs and repeats valid exchange", async (t) => {
+test("alpha BrowserAuth rejects invalid or ambiguous token inputs and repeats valid exchange", async (t) => {
   const fixture = await createUpstreamAuthFixture({ mode: "alpha" });
   t.after(() => fixture.close());
 

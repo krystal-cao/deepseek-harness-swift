@@ -383,9 +383,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     /// protected loopback carrier as WebKit, so a green service handshake
     /// cannot mask a broken Renderer cookie or an accidentally open route.
     ///
-    /// The current 0.1.1-rc.2 package does not expose a stable read-only RPC
-    /// such as workspace.list; that optional capability is therefore not
-    /// invented here. When upstream exposes one, it can be added as another
+    /// The current Runtime packages do not expose a stable read-only RPC such
+    /// as workspace.list; that optional capability is therefore not invented
+    /// here. When upstream exposes one, it can be added as another
     /// capability-specific probe without weakening these mandatory checks.
     private func verifyRuntimeHealth(
         session: DshServiceSession,

@@ -135,7 +135,7 @@ export function createBrowserURLRoute(ctxOrProvider, state = accessState) {
         writeJSON(response, 200, { url });
       } catch {
         // Provider failures are contract failures, not a reason to expose an
-        // anonymous or old-style URL that alpha.2 cannot authenticate.
+        // anonymous or old-style URL that a token-based Runtime cannot authenticate.
         writeJSON(response, 503, { error: "browser authentication unavailable" });
       }
     },

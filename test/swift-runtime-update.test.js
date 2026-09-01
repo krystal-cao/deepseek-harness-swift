@@ -12,7 +12,9 @@ const VERSIONS_VIEW_SOURCE = read('../Sources/SettingsUI/VersionsTabView.swift')
 const GENERAL_SOURCE = read('../Sources/SettingsUI/GeneralTabView.swift')
 const PLUGIN_SOURCE = read('../Sources/Plugins/DshPluginManager.swift')
 const WINDOW_SOURCE = read('../Sources/MainWindow/MainWindowController.swift')
+const UPSTREAM_COOKIE_SOURCE = read('../Sources/MainWindow/DshUpstreamCookieStore.swift')
 const SERVICE_SOURCE = read('../Sources/Service/DshService.swift')
+const PROCESS_IO_SOURCE = read('../Sources/Service/DshProcessIO.swift')
 const HOST_CONTROL = read('../assets/dsh-desktop-host/control.js')
 const APP_SOURCE = read('../Sources/AppDelegate.swift')
 
@@ -85,6 +87,14 @@ test('Profile switches are recoverable across force-quit and commit only after a
 test('runtime state migration prepares descriptors before taking the state lock', () => {
   assert.doesNotMatch(VERSION_MANAGER_SOURCE, /state\.runtimeState\.active\s*=\s*runtimeDescriptor\(/)
   assert.match(VERSION_MANAGER_SOURCE, /let descriptor = runtimeDescriptor\(version: first\)[\s\S]{0,180}DshStateManager\.shared\.update/)
+})
+
+test('runtime startup discovers auth mode from the validated ready URL', () => {
+  assert.doesNotMatch(SERVICE_SOURCE, /DshRuntimeAuthContract/)
+  assert.doesNotMatch(SERVICE_SOURCE, /unsupportedRuntimeAuthentication/)
+  assert.doesNotMatch(PROCESS_IO_SOURCE, /expectedAuthMode/)
+  assert.match(PROCESS_IO_SOURCE, /DshWebEndpoint\.parse\(url, expectedPort: expectedPort\)/)
+  assert.match(UPSTREAM_COOKIE_SOURCE, /session\.endpoint\.authMode/)
 })
 
 test('npm runtime updates use SemVer ordering and a staging candidate', () => {

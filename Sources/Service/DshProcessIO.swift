@@ -27,7 +27,9 @@ public enum DshProcessIOError: Error, LocalizedError, Sendable {
 }
 
 /// Drains child stdout/stderr for the complete process lifetime and resolves
-/// readiness only after both the Web URL and the matching desktop handshake.
+/// readiness only after both the structurally validated Web URL and the
+/// matching desktop handshake. The authentication mode is discovered from the
+/// URL and is validated again by the MainWindowController health gate.
 public final class DshProcessIO: @unchecked Sendable {
     private static let readyRegex = try! NSRegularExpression(
         pattern: #"dsh web:\s+(\S+)"#
@@ -44,7 +46,6 @@ public final class DshProcessIO: @unchecked Sendable {
     private let stdoutPipe: Pipe
     private let stderrPipe: Pipe
     private let expectedGeneration: UUID
-    private let expectedAuthMode: DshAuthMode?
     private let redactor: DshSecretRedactor
     private let lock = NSLock()
 
@@ -70,7 +71,6 @@ public final class DshProcessIO: @unchecked Sendable {
         stderrPipe: Pipe,
         expectedGeneration: UUID,
         expectedPort: Int = 3080,
-        expectedAuthMode: DshAuthMode? = nil,
         secrets: [String] = []
     ) {
         self.proc = proc
@@ -78,7 +78,6 @@ public final class DshProcessIO: @unchecked Sendable {
         self.stderrPipe = stderrPipe
         self.expectedGeneration = expectedGeneration
         self.expectedPort = expectedPort
-        self.expectedAuthMode = expectedAuthMode
         self.redactor = DshSecretRedactor(secrets: secrets)
     }
 
@@ -233,10 +232,6 @@ public final class DshProcessIO: @unchecked Sendable {
            let url = URL(string: String(normalizedLine[urlRange])) {
             do {
                 let endpoint = try DshWebEndpoint.parse(url, expectedPort: expectedPort)
-                if let expectedAuthMode, endpoint.authMode != expectedAuthMode {
-                    failReady(DshProcessIOError.invalidEndpoint("认证模式与运行时契约不匹配。"))
-                    return
-                }
                 lock.lock()
                 guard terminalError == nil else {
                     lock.unlock()
