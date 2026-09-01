@@ -60,9 +60,7 @@ public final class DshUpstreamCookieStore {
         let deadline = Date().addingTimeInterval(timeout)
         let expectedCookieName = try Self.expectedCookieName(for: session)
         while true {
-            let cookies = await allCookies().filter {
-                $0.name == expectedCookieName && isUsableUpstreamCookie($0)
-            }
+            let cookies = await usableCookies(named: expectedCookieName)
             if cookies.count == 1 {
                 return cookies
             }
@@ -80,6 +78,24 @@ public final class DshUpstreamCookieStore {
         }
     }
 
+    /// Return the currently usable BrowserAuth cookie without waiting for a
+    /// new token exchange. This is used by recovery probes after the initial
+    /// startup handshake, when the WebKit cookie may have expired or been
+    /// removed by the system.
+    public func authenticatedCookies(for session: DshServiceSession) async throws -> [HTTPCookie] {
+        try validate(session)
+        guard session.endpoint.authMode == .browserTokenCookie else { return [] }
+
+        let cookies = await usableCookies(named: try Self.expectedCookieName(for: session))
+        if cookies.count > 1 {
+            throw CookieError.ambiguousCookies
+        }
+        guard cookies.count == 1 else {
+            throw CookieError.missingCookie
+        }
+        return cookies
+    }
+
     private func validate(_ session: DshServiceSession) throws {
         guard session.originURL.scheme == "http",
               session.originURL.host == "127.0.0.1",
@@ -95,6 +111,12 @@ public final class DshUpstreamCookieStore {
               cookie.sameSitePolicy == HTTPCookieStringPolicy.sameSiteStrict else { return false }
         if let expiry = cookie.expiresDate, expiry <= Date() { return false }
         return true
+    }
+
+    private func usableCookies(named expectedCookieName: String) async -> [HTTPCookie] {
+        await allCookies().filter {
+            $0.name == expectedCookieName && isUsableUpstreamCookie($0)
+        }
     }
 
     /// Alpha Runtimes name the BrowserAuth cookie with the SHA-256 of the exact

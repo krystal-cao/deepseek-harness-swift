@@ -122,10 +122,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     private var downloadStatusBanner: DownloadStatusBanner?
     private let runtimeOperationGate = DshAsyncOperationGate()
     private let runtimeHealthClient = DshRuntimeHealthClient()
+    private var runtimeReloadTask: Task<Void, Never>?
     private var trafficLightBaseFrames: [NSWindow.ButtonType: NSRect] = [:]
 
     private static let trafficLightHorizontalOffset: CGFloat = 7
     private static let trafficLightVerticalOffset: CGFloat = -7
+    private static let maxAutomaticAuthenticationRecoveries = 1
 
     private enum RuntimeHealthError: LocalizedError {
         case nonHTTPResponse(String)
@@ -133,6 +135,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         case invalidPage
         case malformedBrowserURL
         case malformedLANURL
+        case authenticationRequired
+        case webKitConnectionFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -146,6 +150,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                 return "Browser 访问边界检查失败：Host 返回了无效的 loopback URL。"
             case .malformedLANURL:
                 return "LAN 访问边界检查失败：Host 返回了无效的局域网 URL。"
+            case .authenticationRequired:
+                return "DSH 上游认证已失效，需要重新建立认证会话。"
+            case .webKitConnectionFailed(let reason):
+                return "DSH WebSocket 连接健康检查失败：\(reason)"
             }
         }
     }
@@ -444,6 +452,42 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
         try await verifyBrowserAccessBoundary(session: session)
         if DshStateManager.shared.current.networkExposure == .lan {
             try await verifyLANAccessBoundary(session: session)
+        }
+
+        // Alpha Runtimes carry the actual application Remote stream over this
+        // WebSocket. Run the probe in the page so WebKit's real HttpOnly
+        // cookie state, rather than a manually assembled native Cookie header,
+        // is tested before a Runtime is accepted as healthy.
+        try await verifyWebKitConnection(session: session)
+    }
+
+    private func verifyWebKitConnection(session: DshServiceSession) async throws {
+        guard session.endpoint.authMode == .browserTokenCookie else { return }
+        guard let webView,
+              let currentURL = webView.url,
+              isCurrentRuntimeWebURL(currentURL) else {
+            throw RuntimeHealthError.webKitConnectionFailed("WebKit 当前页面不属于本次 Runtime")
+        }
+
+        let result: Any
+        do {
+            guard let evaluated = try await webView.callAsyncJavaScript(
+                DshWebShell.webUIConnectionProbeScript,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            ) else {
+                throw RuntimeHealthError.webKitConnectionFailed("WebKit 未返回连接探针结果")
+            }
+            result = evaluated
+        } catch {
+            throw RuntimeHealthError.webKitConnectionFailed("WebKit 无法执行连接探针")
+        }
+
+        guard let state = result as? [String: Any],
+              (state["ok"] as? NSNumber)?.boolValue == true else {
+            let reason = (result as? [String: Any])?["reason"] as? String ?? "握手未打开"
+            throw RuntimeHealthError.webKitConnectionFailed(reason)
         }
     }
 
@@ -840,6 +884,26 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
                     let loading = (state?["loading"] as? NSNumber)?.boolValue ?? true
                     let length = (state?["length"] as? NSNumber)?.intValue ?? 0
                     let hasAppShell = (state?["hasAppShell"] as? NSNumber)?.boolValue ?? false
+                    let authenticationRequired = (state?["authenticationRequired"] as? NSNumber)?.boolValue ?? false
+                    if authenticationRequired {
+                        let error = NSError(
+                            domain: "DshWebUI",
+                            code: -401,
+                            userInfo: [NSLocalizedDescriptionKey: RuntimeHealthError.authenticationRequired.localizedDescription]
+                        )
+                        if self.webUIReadyContinuation != nil {
+                            self.webUIReadinessGeneration &+= 1
+                            self.completeWebUIReadiness(.failure(error))
+                        } else {
+                            // The Runtime may reach this page after its
+                            // BrowserAuth cookie expires during an otherwise
+                            // healthy session. Re-enter the bounded recovery
+                            // path so the service issues a fresh bootstrap
+                            // URL instead of replaying the old token.
+                            self.reloadDsh()
+                        }
+                        return
+                    }
                     if !loading && length > 120 && hasAppShell {
                         self.revealWindow()
                         self.completeWebUIReadiness(.success(()))
@@ -915,11 +979,118 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, W
     }
 
     public func reloadDsh() {
-        guard let currentUrl = webView?.url else {
+        guard webView?.url != nil else {
             startAndLoadDsh()
             return
         }
-        webView?.load(URLRequest(url: currentUrl))
+        guard runtimeReloadTask == nil else { return }
+        runtimeReloadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.runtimeReloadTask = nil }
+            await self.reloadDshWithAuthenticationRecovery()
+        }
+    }
+
+    private func reloadDshWithAuthenticationRecovery() async {
+        guard let session = serviceSession,
+              let currentURL = webView?.url else {
+            startAndLoadDsh()
+            return
+        }
+
+        var recoveryCount = 0
+        while true {
+            do {
+                if await currentRuntimeAuthenticationNeedsRecovery(session: session) {
+                    throw RuntimeHealthError.authenticationRequired
+                }
+                try await reloadWebUI(at: currentURL)
+                try await verifyWebKitConnection(session: session)
+                return
+            } catch {
+                guard isAuthenticationRecoveryFailure(error),
+                      recoveryCount < Self.maxAutomaticAuthenticationRecoveries else {
+                    revealWindow()
+                    showErrorAlert(error.localizedDescription)
+                    return
+                }
+
+                recoveryCount += 1
+                do {
+                    // DshService.start() creates a new access generation and
+                    // receives a fresh `dsh web:?token=...` URL. The old
+                    // bootstrap URL is never retained or replayed.
+                    _ = try await restartDshService()
+                    return
+                } catch {
+                    revealWindow()
+                    showErrorAlert("DSH 自动重新认证失败：\(error.localizedDescription)")
+                    return
+                }
+            }
+        }
+    }
+
+    private func currentRuntimeAuthenticationNeedsRecovery(session: DshServiceSession) async -> Bool {
+        guard session.endpoint.authMode == .browserTokenCookie else { return false }
+        guard let upstreamCookieStore else { return true }
+
+        do {
+            let upstreamCookies = try await upstreamCookieStore.authenticatedCookies(for: session)
+            let response = try await runtimeHealthResponse(
+                for: runtimeHealthRequest(url: session.originURL),
+                label: "当前 Runtime 认证",
+                credentials: healthCredentials(
+                    rendererToken: session.access.rendererToken,
+                    upstreamCookies: upstreamCookies
+                ),
+                requireCleanFinalURL: true,
+                maxRedirects: 0
+            )
+            return !(200...299).contains(response.statusCode)
+                || !DshRuntimeHealthClient.isHTMLPage(response)
+        } catch {
+            return true
+        }
+    }
+
+    private func reloadWebUI(at url: URL) async throws {
+        webUIReadinessGeneration &+= 1
+        pendingWebUINavigation = nil
+        let webUIReadyTask = Task { @MainActor in
+            try await self.waitForWebUIReady()
+        }
+        await Task.yield()
+        guard let navigation = webView?.load(URLRequest(url: url)) else {
+            let error = NSError(
+                domain: "DshWebUI",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "无法重新加载 DSH 页面"]
+            )
+            completeWebUIReadiness(.failure(error))
+            throw error
+        }
+        pendingWebUINavigation = navigation
+        do {
+            try await webUIReadyTask.value
+        } catch {
+            pendingWebUINavigation = nil
+            webUIReadinessGeneration &+= 1
+            throw error
+        }
+    }
+
+    private func isAuthenticationRecoveryFailure(_ error: Error) -> Bool {
+        if let healthError = error as? RuntimeHealthError {
+            switch healthError {
+            case .authenticationRequired, .webKitConnectionFailed(_):
+                return true
+            default:
+                return false
+            }
+        }
+        let nsError = error as NSError
+        return nsError.domain == "DshWebUI" && nsError.code == -401
     }
 
     // MARK: - Onboarding View

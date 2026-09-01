@@ -239,12 +239,45 @@ public final class DshWebShell {
       const body = document.body;
       const text = body && typeof body.textContent === 'string' ? body.textContent.trim() : '';
       const hasAppShell = Boolean(document.querySelector('[class*="sidebarCol"], [class*="railIn"], [class*="centerCol"]'));
+      const authenticationRequired = /dsh web authentication required|上游认证|required.*authentication/i.test(text);
       return {
         loading: text.includes('Loading plugins') || text.includes('加载插件'),
         length: text.length,
-        hasAppShell
+        hasAppShell,
+        authenticationRequired
       };
     })();
+    """
+
+    /// Probe the same Remote stream carrier used by the DSH frontend. The
+    /// script runs inside the page so WebKit, rather than a native URLSession,
+    /// decides which HttpOnly cookies are attached to the handshake.
+    public static let webUIConnectionProbeScript = """
+    const target = new URL('/api/remote.mux', window.location.href);
+    target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
+    const timeoutMs = 5000;
+    return await new Promise((resolve) => {
+      let socket;
+      let settled = false;
+      const finish = (ok, reason) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+          socket.close(1000, 'health-check');
+        }
+        resolve({ ok, reason: reason || '' });
+      };
+      const timer = setTimeout(() => finish(false, 'timeout'), timeoutMs);
+      try {
+        socket = new WebSocket(target.toString());
+        socket.addEventListener('open', () => finish(true, 'open'), { once: true });
+        socket.addEventListener('error', () => finish(false, 'error'), { once: true });
+        socket.addEventListener('close', () => finish(false, 'closed-before-open'), { once: true });
+      } catch (_) {
+        finish(false, 'construct');
+      }
+    });
     """
 
     public init(delegate: DshBridgeDelegate) {

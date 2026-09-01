@@ -12,6 +12,7 @@ const HEALTH_SOURCE = read('../Sources/Service/DshRuntimeHealthClient.swift')
 const COOKIE_SOURCE = read('../Sources/MainWindow/DshRendererCookieStore.swift')
 const UPSTREAM_COOKIE_SOURCE = read('../Sources/MainWindow/DshUpstreamCookieStore.swift')
 const WINDOW_SOURCE = read('../Sources/MainWindow/MainWindowController.swift')
+const WEB_SHELL_SOURCE = read('../Sources/MainWindow/DshWebShell.swift')
 const STATE_SOURCE = read('../Sources/State/DshState.swift')
 const SETTINGS_SOURCE = read('../Sources/SettingsUI/SettingsViewModel.swift')
 const APP_SOURCE = read('../Sources/AppDelegate.swift')
@@ -172,6 +173,20 @@ test('native health probes use isolated explicit credentials and bounded same-or
   assert.match(HEALTH_SOURCE, /setCookieHeaders/)
   assert.match(WINDOW_SOURCE, /DshRuntimeHealthClient\.isHTMLPage/)
   assert.match(WINDOW_SOURCE, /credentials:\s*\.anonymous/)
+})
+
+test('alpha Runtime health verifies the real WebKit Remote stream and can renew auth once', () => {
+  assert.match(WEB_SHELL_SOURCE, /webUIConnectionProbeScript/)
+  assert.match(WEB_SHELL_SOURCE, /new URL\('\/api\/remote\.mux'/)
+  assert.match(WEB_SHELL_SOURCE, /new WebSocket\(target\.toString\(\)\)/)
+  assert.match(WINDOW_SOURCE, /callAsyncJavaScript\(/)
+  assert.match(WINDOW_SOURCE, /verifyWebKitConnection\(session: session\)/)
+  assert.match(WINDOW_SOURCE, /authenticatedCookies\(for: session\)/)
+  assert.match(WINDOW_SOURCE, /maxAutomaticAuthenticationRecoveries = 1/)
+  assert.match(WINDOW_SOURCE, /restartDshService\(\)/)
+  assert.match(WINDOW_SOURCE, /authenticationRequired/)
+  assert.match(WINDOW_SOURCE, /self\.reloadDsh\(\)/)
+  assert.match(UPSTREAM_COOKIE_SOURCE, /public func authenticatedCookies\(for session: DshServiceSession\)/)
 })
 
 test('first launch bootstraps the canonical profile and installs the host before DSH starts', () => {
