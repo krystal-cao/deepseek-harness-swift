@@ -6,6 +6,11 @@ const MAX_LINE_BYTES = 16 * 1024;
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const SUPPORTED_PROFILES = new Set(["desktop", "web"]);
+// Swift's launch context may use an app-owned recovery profile label. It is
+// still only a single safe path component; arbitrary DSH_HOME paths and
+// traversal components must never reach the runtime's --profile argument.
+const PROFILE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+const RECOVERY_PROFILE_PATTERN = /^dsh-recovery-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 let started = false;
 let controlReadyAnnounced = false;
@@ -59,7 +64,12 @@ function validatePolicy(message) {
 function validateBootstrap(message) {
   if (!isObject(message) || message.v !== PROTOCOL_VERSION || message.type !== "bootstrap") throw new Error("invalid bootstrap message");
   if (typeof message.entryPath !== "string" || !isAbsolute(message.entryPath) || message.entryPath.includes("\0")) throw new Error("invalid bootstrap entry path");
-  if (typeof message.profile !== "string" || !SUPPORTED_PROFILES.has(message.profile)) throw new Error("invalid bootstrap profile");
+  if (typeof message.profile !== "string"
+      || !PROFILE_NAME_PATTERN.test(message.profile)
+      || message.profile === "."
+      || message.profile === ".."
+      || message.profile.startsWith(".")
+      || (!SUPPORTED_PROFILES.has(message.profile) && !RECOVERY_PROFILE_PATTERN.test(message.profile))) throw new Error("invalid bootstrap profile");
   if (message.host !== "127.0.0.1") throw new Error("invalid bootstrap host");
   if (!Number.isSafeInteger(message.port) || message.port < 1024 || message.port > 65535) throw new Error("invalid bootstrap port");
   if (!isValidGeneration(message.generation)) throw new Error("invalid bootstrap generation");
@@ -165,4 +175,4 @@ export function markDesktopServerReady() {
   maybeAnnounceControlReady();
 }
 
-export { MAX_LINE_BYTES, PROTOCOL_VERSION };
+export { MAX_LINE_BYTES, PROTOCOL_VERSION, validateBootstrap };

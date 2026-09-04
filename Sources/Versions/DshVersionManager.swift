@@ -190,6 +190,14 @@ public final class DshVersionManager {
         return nil
     }
 
+    /// Resolve an explicitly selected Runtime without consulting or changing
+    /// the persisted selection. Launch contexts use this method so a late
+    /// settings refresh cannot redirect an already-starting process to a
+    /// different Runtime.
+    public func resolveEntry(for runtime: NpmRuntimeDescriptor) -> String? {
+        resolvedEntry(for: runtime.version)?.path
+    }
+
     private func resolvedEntry(for version: String) -> URL? {
         guard Self.isValidVersion(version) else { return nil }
         let packageRoot = DshStateManager.versionsDirectory

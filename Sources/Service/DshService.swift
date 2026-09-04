@@ -121,6 +121,9 @@ public final class DshService: @unchecked Sendable {
         return bindResult == 0
     }
 
+    /// Startup-only recovery boundary for the app's current or persisted child.
+    /// A caller that owns a launch transaction must use the context-bound entry
+    /// below so its captured Profile and port cannot be replaced by settings.
     /// Stop this app's current or persisted child before another component
     /// mutates a Profile on disk. A force-quit can leave the Node child alive
     /// after the in-memory `ManagedDshProcess` has gone away, so the persisted
@@ -129,6 +132,7 @@ public final class DshService: @unchecked Sendable {
     /// The configured port is also required to be free before returning. This
     /// prevents an unrelated DSH process sharing the web Profile from racing
     /// pnpm cleanup when ownership cannot be established safely.
+    @available(*, deprecated, message: "Use prepareForProfileMutation(context:) so the target Profile and port are immutable.")
     public func prepareForProfileMutation() async throws {
         await startOperationGate.acquire()
         defer { startOperationGate.release() }
@@ -136,6 +140,22 @@ public final class DshService: @unchecked Sendable {
         await stopAndWait()
 
         let actualPort = DshStateManager.shared.current.dshPort ?? 3080
+        try await waitForProfileMutationPort(actualPort)
+    }
+
+    /// Context-bound variant used by a launch/restart transaction. The port
+    /// is captured before this asynchronous operation begins, so a settings
+    /// refresh cannot redirect the safety check to another service.
+    public func prepareForProfileMutation(context: DshLaunchContext) async throws {
+        try context.validate()
+        await startOperationGate.acquire()
+        defer { startOperationGate.release() }
+
+        await stopAndWait()
+        try await waitForProfileMutationPort(context.port)
+    }
+
+    private func waitForProfileMutationPort(_ actualPort: Int) async throws {
         // The persisted record belongs to the previous app-owned process,
         // not to the current port setting. This must run before checking the
         // new port so a port change cannot strand the old child.
@@ -151,12 +171,12 @@ public final class DshService: @unchecked Sendable {
     }
 
     /// Start or restart the DSH service and return the protected session.
-    public func start(port: Int? = nil) async throws -> DshServiceSession {
+    public func start(context: DshLaunchContext) async throws -> DshServiceSession {
+        try context.validate()
         await startOperationGate.acquire()
         defer { startOperationGate.release() }
 
-        let actualPort = port ?? (DshStateManager.shared.current.dshPort ?? 3080)
-
+        let actualPort = context.port
         // A settings change, version switch, or plugin mutation is a restart.
         // Wait for the old child to exit before probing the port; otherwise
         // the old service can make its own restart look like an external
@@ -176,7 +196,7 @@ public final class DshService: @unchecked Sendable {
             throw ServiceError.portInUse(actualPort)
         }
 
-        guard let entry = DshVersionManager.shared.resolveCurrentEntry() else {
+        guard let entry = DshVersionManager.shared.resolveEntry(for: context.runtimeDescriptor) else {
             throw ServiceError.dshEntryNotFound
         }
 
@@ -187,13 +207,11 @@ public final class DshService: @unchecked Sendable {
             throw ServiceError.runtimeBootstrapNotFound
         }
 
-        let state = DshStateManager.shared.current
         // Do not gate startup on a Runtime-version allow-list. DshProcessIO
         // derives the supported authentication shape from the validated ready
         // URL, and MainWindowController performs the behavioral health gate.
         let access = try DshAccessController(
-            ordinaryBrowserEnabled: state.browserAccessEnabled,
-            networkExposure: state.networkExposure
+            effectiveAccessPolicy: context.effectiveAccessPolicy
         )
 
         let proc = Process()
@@ -210,6 +228,7 @@ public final class DshService: @unchecked Sendable {
         var managedEnvironment = environment
         managedEnvironment["DSH_DESKTOP_LAUNCH"] = "1"
         managedEnvironment["DSH_DESKTOP_PORT"] = String(actualPort)
+        managedEnvironment["DSH_HOME"] = context.effectiveDshHome.path
         proc.environment = managedEnvironment
 
         let processIO = DshProcessIO(
@@ -254,14 +273,15 @@ public final class DshService: @unchecked Sendable {
         do {
             try access.sendBootstrap(
                 entryPath: entry,
-                profile: state.appProfile,
+                profileName: context.profileName,
                 port: actualPort
             )
             let endpoint = try await processIO.waitForReady()
-            return DshServiceSession(endpoint: endpoint, access: access.generation)
+            return DshServiceSession(endpoint: endpoint, access: access.generation, context: context)
         } catch {
             await stopAndWait()
             if let serviceError = error as? ServiceError { throw serviceError }
+            if let processError = error as? DshProcessIOError { throw processError }
             throw ServiceError.startupFailed(error.localizedDescription)
         }
     }

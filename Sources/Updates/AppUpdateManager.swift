@@ -13,10 +13,18 @@ public final class AppUpdateManager: ObservableObject {
 
     private init() {
         updaterController = SPUStandardUpdaterController(
-            startingUpdater: true,
+            startingUpdater: false,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        // M1 packages are ad-hoc signed and are not publishable Sparkle
+        // artifacts. A persisted automatic-check preference can otherwise
+        // launch Sparkle's SwiftUI user-driver window during application
+        // startup; on macOS 26 that window currently enters an AppKit
+        // safe-area constraint loop and aborts the host process. Keep manual
+        // “Check for Updates” available without presenting update UI on boot.
+        updaterController.updater.automaticallyChecksForUpdates = false
+        updaterController.startUpdater()
     }
 
     public var updater: SPUUpdater {

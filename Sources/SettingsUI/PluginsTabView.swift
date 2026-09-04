@@ -34,7 +34,9 @@ public struct PluginsTabView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
-                    .disabled(localState.newPluginSpec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isOperatingPlugin)
+                    .disabled(localState.newPluginSpec.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || viewModel.isOperatingPlugin
+                        || !viewModel.pluginMutationsAllowed)
                     .help("安装指定的 npm 插件")
                 }
                 .padding(.horizontal, 12)
@@ -64,6 +66,10 @@ public struct PluginsTabView: View {
                 .background(Color.green.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
 
+            if viewModel.isInspectingPlugins || viewModel.pluginInspectionMessage != nil {
+                pluginInspectionPanel
+            }
+
             SettingsSection("已安装插件", footer: "内置桥接插件由 DSH Desktop 维护，不能卸载。") {
                 VStack(spacing: 0) {
                     HStack {
@@ -75,7 +81,7 @@ public struct PluginsTabView: View {
                             Button("全部更新") { viewModel.updateAllPlugins() }
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
-                                .disabled(viewModel.isOperatingPlugin)
+                                .disabled(viewModel.isOperatingPlugin || !viewModel.pluginMutationsAllowed)
                                 .help("更新所有可更新插件")
                         }
                         Button {
@@ -93,6 +99,21 @@ public struct PluginsTabView: View {
                         .controlSize(.small)
                         .disabled(viewModel.isCheckingPluginUpdates || viewModel.isOperatingPlugin)
                         .help("检查已安装插件是否有新版本")
+                        Button {
+                            Task { await viewModel.inspectPlugins() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                if viewModel.isInspectingPlugins {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                }
+                                Text(viewModel.isInspectingPlugins ? "正在检查配置…" : "检查配置")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(viewModel.isInspectingPlugins || viewModel.isOperatingPlugin)
+                        .help("只读检查当前 Profile 的包、Bundle 和 patch 引用")
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 11)
@@ -120,6 +141,71 @@ public struct PluginsTabView: View {
             if viewModel.outdatedPluginsMap.isEmpty {
                 await viewModel.checkPluginUpdates()
             }
+            if viewModel.pluginInspectionResult == nil {
+                await viewModel.inspectPlugins()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pluginInspectionPanel: some View {
+        let result = viewModel.pluginInspectionResult
+        let knownItems = result?.items.filter {
+            switch $0.status {
+            case .missingPackage, .notComposed, .patchReferenceMissing, .duplicateBundle:
+                return true
+            case .healthy, .disabled, .unavailable, .uncertain:
+                return false
+            }
+        } ?? []
+        let uncertain = result?.items.contains {
+            $0.status == .unavailable || $0.status == .uncertain
+        } == true || result?.issues.contains {
+            $0.code == "patchInspectionUnavailable"
+        } == true
+        let hasKnownIssue = !knownItems.isEmpty
+        let icon = viewModel.isInspectingPlugins
+            ? "magnifyingglass"
+            : (hasKnownIssue ? "exclamationmark.triangle.fill" : (uncertain ? "questionmark.circle.fill" : "checkmark.circle.fill"))
+        let tint = viewModel.isInspectingPlugins
+            ? Color.accentColor
+            : (hasKnownIssue ? Color.orange : (uncertain ? Color.secondary : Color.green))
+
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(viewModel.isInspectingPlugins ? "正在进行只读一致性检查…" : (viewModel.pluginInspectionMessage ?? ""))
+                    .font(.system(size: 11.5, weight: .medium))
+                if let result {
+                        Text("已扫描 \(result.scannedFileCount) 个文件；不确定状态会阻止启动写入。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                    ForEach(Array(knownItems.prefix(4).enumerated()), id: \.offset) { _, item in
+                        Text("• \(inspectionItemLabel(item))：\(item.name)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    if uncertain {
+                        Text("部分配置无法确认，详情可在诊断页面查看。")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(11)
+        .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func inspectionItemLabel(_ item: DshPluginInspectionItem) -> String {
+        switch item.status {
+        case .missingPackage: return "包缺失"
+        case .notComposed: return "未启用 Bundle"
+        case .patchReferenceMissing: return "patch 引用失效"
+        case .duplicateBundle: return "Bundle 重复引用"
+        case .healthy, .disabled, .unavailable, .uncertain: return "配置状态"
         }
     }
 
@@ -167,7 +253,7 @@ public struct PluginsTabView: View {
                         .controlSize(.small)
                         .help("卸载 " + plugin.name)
                 }
-                .disabled(viewModel.isOperatingPlugin)
+                .disabled(viewModel.isOperatingPlugin || !viewModel.pluginMutationsAllowed)
             }
         }
         .padding(.horizontal, 14)

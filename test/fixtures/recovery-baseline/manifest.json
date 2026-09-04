@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "purpose": "F00 isolated startup and recovery acceptance fixtures",
+  "layout": {
+    "profileRoot": "DSH_HOME/profiles/<profile>/",
+    "applicationSupportRoot": "DSH_TEST_APP_SUPPORT/DSH/"
+  },
+  "runtime": {
+    "active": {
+      "version": "0.1.1-rc.2",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-fixture-active",
+      "installedAt": "2026-09-03T00:00:00.000Z"
+    },
+    "candidate": {
+      "version": "0.1.2-alpha.3",
+      "registry": "https://registry.npmjs.org",
+      "integrity": "sha512-fixture-candidate",
+      "installedAt": "2026-09-03T00:00:01.000Z"
+    }
+  },
+  "cases": [
+    {
+      "id": "normal-desktop",
+      "profile": "desktop",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-desktop\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.1\",\"@deepseek-ai/dsh-web-app\":\"0.1.1\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "node_modules/.fixture-marker": "normal-desktop\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.1-rc.2\",\"appProfile\":\"desktop\",\"autoFollowLatest\":false,\"runtimeState\":{\"active\":{\"version\":\"0.1.1-rc.2\",\"registry\":\"https://registry.npmjs.org\",\"integrity\":\"sha512-fixture-active\",\"installedAt\":\"2026-09-03T00:00:00.000Z\"},\"profile\":\"desktop\",\"phase\":\"idle\",\"updatePolicy\":\"notify\",\"channel\":\"latest\",\"healthyStartCount\":1},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": null,
+      "expected": {
+        "stage": "ready",
+        "errorCode": null,
+        "recovery": "none"
+      }
+    },
+    {
+      "id": "normal-web",
+      "profile": "web",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-web\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.1\",\"@deepseek-ai/dsh-web-app\":\"0.1.1\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "node_modules/.fixture-marker": "normal-web\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.1-rc.2\",\"appProfile\":\"web\",\"autoFollowLatest\":false,\"runtimeState\":{\"active\":{\"version\":\"0.1.1-rc.2\",\"registry\":\"https://registry.npmjs.org\",\"integrity\":\"sha512-fixture-active\",\"installedAt\":\"2026-09-03T00:00:00.000Z\"},\"profile\":\"web\",\"phase\":\"idle\",\"updatePolicy\":\"notify\",\"channel\":\"latest\",\"healthyStartCount\":1},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": null,
+      "expected": {
+        "stage": "ready",
+        "errorCode": null,
+        "recovery": "none; preserve shared web ownership"
+      }
+    },
+    {
+      "id": "missing-package",
+      "profile": "desktop",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-missing-package\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.1\",\"dsh-broken-plugin\":\"1.0.0\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.1-rc.2\",\"appProfile\":\"desktop\",\"autoFollowLatest\":false,\"runtimeState\":{\"profile\":\"desktop\",\"phase\":\"idle\",\"updatePolicy\":\"notify\",\"channel\":\"latest\"},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": {
+        "stage": "dependencyCheck",
+        "errorCode": "PROFILE_PACKAGE_MISSING",
+        "detail": "declared dsh-broken-plugin has no materialized package"
+      },
+      "expected": {
+        "stage": "dependencyCheck",
+        "errorCode": "PROFILE_PACKAGE_MISSING",
+        "recovery": "diagnostics/settings remain available; do not rewrite profile"
+      }
+    },
+    {
+      "id": "frontend-load-failure",
+      "profile": "desktop",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-frontend-failure\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.1\",\"@deepseek-ai/dsh-web-app\":\"0.1.1\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "node_modules/.fixture-marker": "frontend-load-failure\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.1-rc.2\",\"appProfile\":\"desktop\",\"autoFollowLatest\":false,\"runtimeState\":{\"profile\":\"desktop\",\"phase\":\"idle\",\"updatePolicy\":\"notify\",\"channel\":\"latest\"},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": {
+        "stage": "loadInterface",
+        "errorCode": "FRONTEND_LOAD_FAILED",
+        "detail": "fixture root did not produce a usable document"
+      },
+      "expected": {
+        "stage": "loadInterface",
+        "errorCode": "FRONTEND_LOAD_FAILED",
+        "recovery": "native recovery/settings/details remain available"
+      }
+    },
+    {
+      "id": "port-occupied",
+      "profile": "desktop",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-port-occupied\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.1\",\"@deepseek-ai/dsh-web-app\":\"0.1.1\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "node_modules/.fixture-marker": "port-occupied\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.1-rc.2\",\"appProfile\":\"desktop\",\"autoFollowLatest\":false,\"runtimeState\":{\"profile\":\"desktop\",\"phase\":\"idle\",\"updatePolicy\":\"notify\",\"channel\":\"latest\"},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": {
+        "stage": "startService",
+        "errorCode": "PORT_IN_USE",
+        "port": 3080,
+        "detail": "fixture listener owns 127.0.0.1:3080"
+      },
+      "expected": {
+        "stage": "startService",
+        "errorCode": "PORT_IN_USE",
+        "recovery": "report exact port; do not kill unrelated process"
+      }
+    },
+    {
+      "id": "runtime-transaction-incomplete",
+      "profile": "desktop",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-runtime-transaction\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.2-alpha.3\",\"@deepseek-ai/dsh-web-app\":\"0.1.2-alpha.3\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "node_modules/.fixture-marker": "runtime-transaction-incomplete\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.2-alpha.3\",\"appProfile\":\"desktop\",\"autoFollowLatest\":false,\"runtimeState\":{\"active\":{\"version\":\"0.1.2-alpha.3\",\"registry\":\"https://registry.npmjs.org\",\"integrity\":\"sha512-fixture-candidate\",\"installedAt\":\"2026-09-03T00:00:01.000Z\"},\"previous\":{\"version\":\"0.1.1-rc.2\",\"registry\":\"https://registry.npmjs.org\",\"integrity\":\"sha512-fixture-active\",\"installedAt\":\"2026-09-03T00:00:00.000Z\"},\"pending\":{\"version\":\"0.1.2-alpha.3\",\"registry\":\"https://registry.npmjs.org\",\"integrity\":\"sha512-fixture-candidate\",\"installedAt\":\"2026-09-03T00:00:01.000Z\"},\"profile\":\"desktop\",\"phase\":\"verifying\",\"updatePolicy\":\"notify\",\"channel\":\"alpha\",\"healthyStartCount\":0,\"lastDiagnostic\":\"fixture candidate health gate did not complete\"},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": {
+        "stage": "dependencyCheck",
+        "errorCode": "RUNTIME_TRANSACTION_INCOMPLETE",
+        "transactionPhase": "verifying"
+      },
+      "expected": {
+        "stage": "dependencyCheck",
+        "errorCode": "RUNTIME_TRANSACTION_INCOMPLETE",
+        "recovery": "restore previous active; retain pending and diagnostic; do not confirm candidate"
+      }
+    },
+    {
+      "id": "profile-transaction-incomplete",
+      "profile": "web",
+      "profileFiles": {
+        "package.json": "{\"name\":\"dsh-f00-profile-transaction\",\"private\":true,\"dependencies\":{\"@deepseek-ai/dsh-base\":\"0.1.1\",\"@deepseek-ai/dsh-web-app\":\"0.1.1\"}}\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "node_modules/.fixture-marker": "profile-transaction-incomplete\n"
+      },
+      "stateFiles": {
+        "dsh-state.json": "{\"selectedVersion\":\"0.1.1-rc.2\",\"appProfile\":\"web\",\"pendingProfileSwitch\":{\"from\":\"desktop\",\"to\":\"web\",\"phase\":\"switching\",\"startedAt\":\"2026-09-03T00:00:02.000Z\"},\"autoFollowLatest\":false,\"runtimeState\":{\"profile\":\"desktop\",\"phase\":\"idle\",\"updatePolicy\":\"notify\",\"channel\":\"latest\"},\"dshPort\":3080,\"browserAccessEnabled\":false,\"networkExposure\":\"loopback\",\"uiTheme\":\"default\",\"translateCommands\":true}\n"
+      },
+      "failure": {
+        "stage": "prepare",
+        "errorCode": "PROFILE_SWITCH_INCOMPLETE",
+        "transactionPhase": "switching"
+      },
+      "expected": {
+        "stage": "prepare",
+        "errorCode": "PROFILE_SWITCH_INCOMPLETE",
+        "recovery": "restore from Profile; preserve pending record; recovery Profile is never from/to"
+      }
+    }
+  ]
+}

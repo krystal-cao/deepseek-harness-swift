@@ -52,6 +52,7 @@ public struct VersionsTabView: View {
         Binding(
             get: { viewModel.runtimeChannel },
             set: {
+                guard viewModel.pluginMutationsAllowed else { return }
                 viewModel.runtimeChannel = $0
                 if $0 != .latest {
                     viewModel.autoFollowLatest = false
@@ -142,7 +143,8 @@ public struct VersionsTabView: View {
                             Toggle("", isOn: Binding(
                                 get: { viewModel.autoFollowLatest },
                                 set: {
-                                    guard automaticUpdatesAllowed else { return }
+                                    guard automaticUpdatesAllowed,
+                                          viewModel.pluginMutationsAllowed else { return }
                                     viewModel.autoFollowLatest = $0
                                     viewModel.saveGeneralSettings()
                                 }
@@ -151,7 +153,7 @@ public struct VersionsTabView: View {
                             .toggleStyle(.switch)
                             .controlSize(.small)
                             .fixedSize()
-                            .disabled(!automaticUpdatesAllowed)
+                            .disabled(!automaticUpdatesAllowed || !viewModel.pluginMutationsAllowed)
                         }
                         .frame(width: 220, alignment: .trailing)
                     }
@@ -170,7 +172,7 @@ public struct VersionsTabView: View {
                         .pickerStyle(.menu)
                         .controlSize(.small)
                         .frame(width: 150, alignment: .trailing)
-                        .disabled(!runtimeUpdatesAllowed)
+                        .disabled(!runtimeUpdatesAllowed || !viewModel.pluginMutationsAllowed)
                     }
 
                     SettingsDivider()
@@ -206,7 +208,7 @@ public struct VersionsTabView: View {
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
-                            .disabled(viewModel.isUpdatingRuntime)
+                            .disabled(viewModel.isUpdatingRuntime || !viewModel.pluginMutationsAllowed)
                         }
 
                         Button {

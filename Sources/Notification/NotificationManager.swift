@@ -10,19 +10,6 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
         UNUserNotificationCenter.current().delegate = self
     }
 
-    /// Request notification authorization.
-    public func requestAuthorization() {
-        let center = UNUserNotificationCenter.current()
-        center.getNotificationSettings { settings in
-            guard settings.authorizationStatus == .notDetermined else { return }
-            center.requestAuthorization(options: [.alert, .sound, .badge]) { _, error in
-                if let error = error {
-                    print("[NotificationManager] Authorization error:", error)
-                }
-            }
-        }
-    }
-
     /// Display a task completion notification.
     public func showTaskDoneNotification(title: String?, cwd: String?) {
         let sessionLabel = (title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
@@ -43,14 +30,34 @@ public final class NotificationManager: NSObject, UNUserNotificationCenterDelega
         }
         content.sound = .default
 
+        let center = UNUserNotificationCenter.current()
+        center.getNotificationSettings { [weak self] settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                self?.post(content, using: center)
+            case .notDetermined:
+                // M1 packages are ad-hoc signed. Asking for notification
+                // permission from an ad-hoc build creates a system SwiftUI
+                // window that aborts in a safe-area constraint loop on
+                // macOS 26. Deliver only when permission already exists;
+                // a later signed release can expose an explicit opt-in UI.
+                return
+            case .denied:
+                return
+            @unknown default:
+                return
+            }
+        }
+    }
+
+    private func post(_ content: UNNotificationContent, using center: UNUserNotificationCenter) {
         let request = UNNotificationRequest(
             identifier: UUID().uuidString,
             content: content,
             trigger: nil
         )
-
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error = error {
+        center.add(request) { error in
+            if let error {
                 print("[NotificationManager] Failed to post notification:", error)
             }
         }

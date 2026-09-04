@@ -105,6 +105,13 @@ public enum DshControlProtocol {
         exposure == .loopback || exposure == .lan
     }
 
+    public static func validateProfileName(_ name: String) -> Bool {
+        // Keep the legacy enum check visible for the two user-selectable
+        // Profiles, while allowing an application-owned recovery label. The
+        // shared validator rejects separators and traversal spellings.
+        DshAppProfile(rawValue: name) != nil || DshLaunchContext.isValidProfileName(name)
+    }
+
     public static func encodeGeneration(_ message: DshGenerationMessage) throws -> Data {
         guard message.v == version,
               message.type == "generation",
@@ -118,11 +125,12 @@ public enum DshControlProtocol {
     }
 
     public static func encodeBootstrap(_ message: DshBootstrapMessage) throws -> Data {
+        let knownProfile = DshAppProfile(rawValue: message.profile) != nil
         guard message.v == version,
               message.type == "bootstrap",
               message.entryPath.hasPrefix("/"),
               !message.entryPath.contains("\0"),
-              DshAppProfile(rawValue: message.profile) != nil,
+              (knownProfile || DshLaunchContext.isValidProfileName(message.profile)),
               message.host == "127.0.0.1",
               (1024...65535).contains(message.port),
               UUID(uuidString: message.generation) != nil,

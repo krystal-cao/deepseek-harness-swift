@@ -2,6 +2,16 @@ import AppKit
 import Sparkle
 import WebKit
 
+private enum DshAppDelegateLog {
+    static let maximumLength = 600
+
+    static func safe(_ error: Error) -> String {
+        let redacted = DshSecretRedactor().redact(error.localizedDescription)
+        guard redacted.count > maximumLength else { return redacted }
+        return String(redacted.prefix(maximumLength)) + "…"
+    }
+}
+
 @MainActor
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     public func applicationDidFinishLaunching(_ notification: Notification) {
@@ -10,7 +20,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         // the menu item and About settings row.
         _ = AppUpdateManager.shared
         setupAppMenu()
-        NotificationManager.shared.requestAuthorization()
         Task { @MainActor in
             // Recovery and Profile cleanup can touch thousands of files. Keep
             // the UI responsive and let MainWindowController perform the one
@@ -23,23 +32,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // touch package.json, pnpm-lock.yaml, or node_modules.
             let profileMutationIsSafe: Bool
             do {
-                try await DshService.shared.prepareForProfileMutation()
+                // Startup recovery, snapshot cleanup, and the first launch
+                // share one operation gate. This prevents MainWindow from
+                // queueing a start between the stale-process check and a
+                // recovery write.
+                try await MainWindowController.shared.withRuntimeOperation {
+                    try await DshService.shared.prepareForProfileMutation()
+                    await SettingsViewModel.shared.recoverPendingProfileSwitch()
+                    await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
+                    await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
+
+                    _ = await Task.detached(priority: .utility) {
+                        DshVersionManager.shared.cleanupUnreferencedVersions()
+                    }.value
+                    _ = await DshPluginManager.shared.cleanupOrphanedWebProfileSnapshots(
+                        keeping: DshStateManager.shared.current.runtimeState.webProfileSnapshotID
+                    )
+                }
                 profileMutationIsSafe = true
             } catch {
                 profileMutationIsSafe = false
-                print("[AppDelegate] Profile recovery deferred until the DSH port is safe:", error)
+                print("[AppDelegate] Profile recovery deferred until the DSH port is safe:", DshAppDelegateLog.safe(error))
             }
-            if profileMutationIsSafe {
-                await SettingsViewModel.shared.recoverPendingProfileSwitch()
-                await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
-                await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
-            }
-            _ = await Task.detached(priority: .utility) {
-                DshVersionManager.shared.cleanupUnreferencedVersions()
-            }.value
-            _ = await DshPluginManager.shared.cleanupOrphanedWebProfileSnapshots(
-                keeping: DshStateManager.shared.current.runtimeState.webProfileSnapshotID
-            )
+            _ = profileMutationIsSafe
             MainWindowController.shared.launch()
             await SettingsViewModel.shared.refreshCatalog()
             await SettingsViewModel.shared.followLatestIfEnabled()

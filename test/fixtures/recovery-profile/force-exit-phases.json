@@ -1,0 +1,26 @@
+{
+  "name": "recovery-force-exit-fixture",
+  "purpose": "exercise restart recovery from every persisted materialization/cleanup boundary",
+  "phases": [
+    {
+      "phase": "entered",
+      "interruptAfter": "state-record-write",
+      "expected": "record remains readable; a retry may materialize or clean the owned tree"
+    },
+    {
+      "phase": "launched",
+      "interruptAfter": "recovery-service-start",
+      "expected": "the next launch uses the persisted isolated DSH_HOME"
+    },
+    {
+      "phase": "cleanupPending",
+      "interruptAfter": "profile-tree-removal",
+      "expected": "cleanup can be retried without touching the original Profile"
+    },
+    {
+      "phase": "cleaned",
+      "interruptAfter": "cleaned-record-write",
+      "expected": "the next cleanup only removes the stale record and succeeds idempotently"
+    }
+  ]
+}

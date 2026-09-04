@@ -18,10 +18,19 @@ public struct DshAccessGeneration: Sendable {
 public struct DshServiceSession: Sendable {
     public let endpoint: DshWebEndpoint
     public let access: DshAccessGeneration
+    /// Immutable launch inputs used to create this session. Keeping the
+    /// context on the session prevents authenticated navigation and health
+    /// checks from falling back to mutable global settings.
+    public let context: DshLaunchContext
 
-    public init(endpoint: DshWebEndpoint, access: DshAccessGeneration) {
+    public init(
+        endpoint: DshWebEndpoint,
+        access: DshAccessGeneration,
+        context: DshLaunchContext
+    ) {
         self.endpoint = endpoint
         self.access = access
+        self.context = context
     }
 
     public var originURL: URL { endpoint.originURL }
@@ -40,14 +49,21 @@ public final class DshAccessController: @unchecked Sendable {
     private var currentOrdinaryBrowserEnabled: Bool
     private var currentNetworkExposure: DshNetworkExposure
 
-    public init(ordinaryBrowserEnabled: Bool = false, networkExposure: DshNetworkExposure = .loopback) throws {
+    public convenience init(ordinaryBrowserEnabled: Bool = false, networkExposure: DshNetworkExposure = .loopback) throws {
+        try self.init(effectiveAccessPolicy: DshEffectiveAccessPolicy(
+            browserAccessEnabled: ordinaryBrowserEnabled,
+            networkExposure: networkExposure
+        ))
+    }
+
+    public init(effectiveAccessPolicy: DshEffectiveAccessPolicy) throws {
         self.generation = DshAccessGeneration(
             rendererToken: try Self.makeRendererToken(),
-            ordinaryBrowserEnabled: ordinaryBrowserEnabled,
-            networkExposure: networkExposure
+            ordinaryBrowserEnabled: effectiveAccessPolicy.browserAccessEnabled,
+            networkExposure: effectiveAccessPolicy.networkExposure
         )
-        self.currentOrdinaryBrowserEnabled = ordinaryBrowserEnabled
-        self.currentNetworkExposure = networkExposure
+        self.currentOrdinaryBrowserEnabled = effectiveAccessPolicy.browserAccessEnabled
+        self.currentNetworkExposure = effectiveAccessPolicy.networkExposure
         let pipe = Pipe()
         self.controlReadHandle = pipe.fileHandleForReading
         self.controlWriteHandle = pipe.fileHandleForWriting
@@ -60,12 +76,16 @@ public final class DshAccessController: @unchecked Sendable {
     }
 
     public func sendBootstrap(entryPath: String, profile: DshAppProfile, port: Int) throws {
+        try sendBootstrap(entryPath: entryPath, profileName: profile.rawValue, port: port)
+    }
+
+    public func sendBootstrap(entryPath: String, profileName: String, port: Int) throws {
         lock.lock()
         defer { lock.unlock() }
         guard !didSendGeneration, !didCloseWriteHandle else { return }
         let message = DshBootstrapMessage(
             entryPath: entryPath,
-            profile: profile.rawValue,
+            profile: profileName,
             port: port,
             generation: generation.id,
             rendererToken: generation.rendererToken,

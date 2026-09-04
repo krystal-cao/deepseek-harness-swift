@@ -21,6 +21,20 @@ private enum DshRuntimeUpdateFailure: LocalizedError {
     }
 }
 
+private enum DshSettingsUIMessage {
+    static let maximumLength = 600
+
+    static func safe(_ text: String) -> String {
+        let redacted = DshSecretRedactor().redact(text)
+        guard redacted.count > maximumLength else { return redacted }
+        return String(redacted.prefix(maximumLength)) + "…"
+    }
+
+    static func safe(_ error: Error) -> String {
+        safe(error.localizedDescription)
+    }
+}
+
 @MainActor
 public final class SettingsViewModel: ObservableObject {
     public static let shared = SettingsViewModel()
@@ -51,6 +65,9 @@ public final class SettingsViewModel: ObservableObject {
 
     @Published public var installedPlugins: [DshPluginItem] = []
     @Published public var outdatedPluginsMap: [String: String] = [:]
+    @Published public private(set) var pluginInspectionResult: DshPluginInspectionResult?
+    @Published public private(set) var isInspectingPlugins = false
+    @Published public private(set) var pluginInspectionMessage: String?
 
     @Published public var isInstallingVersion: Bool = false
     @Published public var isUpdatingRuntime: Bool = false
@@ -73,6 +90,22 @@ public final class SettingsViewModel: ObservableObject {
     @Published public private(set) var pendingPluginUpdate: DshPendingPluginUpdate? = nil
     @Published public var pluginStatusMessage: String? = nil
     @Published public var alertMessage: String? = nil
+
+    /// Mutating the selected Profile or Runtime is suspended while a recovery
+    /// transaction is unresolved or the service is serving an isolated
+    /// recovery Profile. Read-only inspection remains available in those
+    /// states so the user can still understand the failure.
+    public var pluginMutationsAllowed: Bool {
+        let state = DshStateManager.shared.current
+        guard state.runtimeState.phase == .idle,
+              state.runtimeState.previous == nil,
+              state.runtimeState.pending == nil,
+              state.runtimeState.transactionID == nil,
+              state.runtimeState.webProfileSnapshotID == nil,
+              state.pendingProfileSwitch == nil,
+              !MainWindowController.shared.hasUnresolvedRecovery else { return false }
+        return MainWindowController.shared.currentLaunchContext?.purpose != .recovery
+    }
 
     private var isFollowingLatest = false
     private var catalogRequestGeneration = 0
@@ -127,10 +160,14 @@ public final class SettingsViewModel: ObservableObject {
         self.networkExposure = state.networkExposure
         if state.networkExposure != .lan { self.lanURL = nil }
         self.uiTheme = state.uiTheme
-        self.externalTheme = DshPluginManager.shared.detectExternalTheme()
+        let settingsProfileDirectory = DshLaunchContext.profileDirectory(for: effectiveProfile)
+        self.externalTheme = DshPluginManager.shared.detectExternalTheme(at: settingsProfileDirectory)
         self.translateCommands = state.translateCommands
         self.installedVersions = DshVersionManager.shared.listInstalledVersions()
-        self.installedPlugins = DshPluginManager.shared.listPlugins(outdatedMap: outdatedPluginsMap)
+        self.installedPlugins = DshPluginManager.shared.listPlugins(
+            at: settingsProfileDirectory,
+            outdatedMap: outdatedPluginsMap
+        )
 
         if let diagnostic = DshStateManager.shared.current.runtimeState.lastDiagnostic {
             self.alertMessage = diagnostic
@@ -151,6 +188,7 @@ public final class SettingsViewModel: ObservableObject {
     public func recoverPendingProfileSwitch() async {
         let state = DshStateManager.shared.current
         guard let transaction = state.pendingProfileSwitch else { return }
+        let capturedRegistry = DshVersionManager.normalizedRegistry(state.npmRegistry)
 
         // When leaving web, the desktop target is already healthy once the
         // transaction reaches finalizing; only the source cleanup remains.
@@ -175,7 +213,10 @@ public final class SettingsViewModel: ObservableObject {
         var cleanupError: Error?
         if requiresWebCleanup {
             do {
-                try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+                try await DshPluginManager.shared.removeDesktopHostArtifacts(
+                    from: .web,
+                    registry: capturedRegistry
+                )
             } catch {
                 cleanupError = error
             }
@@ -193,18 +234,43 @@ public final class SettingsViewModel: ObservableObject {
         // MainWindowController starts the service.
         loadFromState()
         if let cleanupError {
-            alertMessage = "检测到未完成的 Profile 切换，已恢复 \(restoreProfile.rawValue)，但 web 桥接清理失败，将在下次启动重试：\(cleanupError.localizedDescription)"
+            alertMessage = "检测到未完成的 Profile 切换，已恢复 \(restoreProfile.rawValue)，但 web 桥接清理失败，将在下次启动重试：\(DshSettingsUIMessage.safe(cleanupError))"
         } else {
             alertMessage = "检测到未完成的 Profile 切换，已恢复 \(restoreProfile.rawValue)。"
         }
     }
 
-    /// Retry cleanup after startup has verified the Profile selected by a
-    /// previously interrupted switch. This covers a transient pnpm failure
-    /// without blocking the safe Profile from launching.
-    public func retryPendingProfileSwitchCleanup() async {
+    public func retryPendingProfileSwitchCleanup(for context: DshLaunchContext) async {
         let state = DshStateManager.shared.current
-        guard let transaction = state.pendingProfileSwitch else { return }
+        guard context.isFresh(in: state),
+              context.purpose == .profileSwitch || context.purpose == .profileRollback,
+              let contextTransactionID = context.transactionID,
+              let transaction = state.pendingProfileSwitch,
+              transaction.transactionID == contextTransactionID,
+              context.profile == state.appProfile,
+              context.originalProfile == transaction.from else { return }
+        if context.purpose == .profileRollback {
+            guard context.profile == transaction.from,
+                  state.appProfile == transaction.from else { return }
+            do {
+                // A failed switch may have partially materialized the target
+                // Profile. Clean only that target, then clear its transaction;
+                // the source Profile is the one that just passed health checks.
+                try await DshPluginManager.shared.removeDesktopHostArtifacts(
+                    from: transaction.to,
+                    profileDirectory: DshLaunchContext.profileDirectory(for: transaction.to),
+                    registry: context.runtimeDescriptor.registry
+                )
+                DshStateManager.shared.update { state in
+                    guard state.pendingProfileSwitch == transaction,
+                          state.appProfile == transaction.from else { return }
+                    state.pendingProfileSwitch = nil
+                }
+            } catch {
+                alertMessage = "目标 \(transaction.to.rawValue) Profile 清理仍失败，将在下次启动重试：\(DshSettingsUIMessage.safe(error))"
+            }
+            return
+        }
         let targetWasHealthy = transaction.phase == .finalizing
             && state.appProfile == transaction.to
         let desktopSourceFailure = transaction.from == .desktop
@@ -213,20 +279,32 @@ public final class SettingsViewModel: ObservableObject {
         guard targetWasHealthy || desktopSourceFailure else { return }
 
         do {
-            try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+            try await DshPluginManager.shared.removeDesktopHostArtifacts(
+                from: .web,
+                registry: context.runtimeDescriptor.registry
+            )
             DshStateManager.shared.update { state in
                 guard state.pendingProfileSwitch == transaction else { return }
                 state.pendingProfileSwitch = nil
             }
         } catch {
-            alertMessage = "web 桥接清理仍失败，将在下次启动重试：\(error.localizedDescription)"
+            alertMessage = "web 桥接清理仍失败，将在下次启动重试：\(DshSettingsUIMessage.safe(error))"
         }
     }
 
     /// Refresh the profile-based theme state after plugin changes or when the
     /// general settings page becomes visible.
     public func refreshExternalTheme() {
-        let detected = DshPluginManager.shared.detectExternalTheme()
+        let directory = DshLaunchContext.profileDirectory(for: appProfile)
+        refreshExternalTheme(at: directory)
+    }
+
+    public func refreshExternalTheme(for context: DshLaunchContext) {
+        refreshExternalTheme(at: context.profileDirectory)
+    }
+
+    private func refreshExternalTheme(at directory: URL) {
+        let detected = DshPluginManager.shared.detectExternalTheme(at: directory)
         guard externalTheme != detected else { return }
         externalTheme = detected
         MainWindowController.shared.syncUiTheme()
@@ -262,15 +340,27 @@ public final class SettingsViewModel: ObservableObject {
         } catch {
             if requestGeneration == catalogRequestGeneration,
                DshVersionManager.normalizedRegistry(npmRegistry) == registry {
-                self.alertMessage = error.localizedDescription
+                self.alertMessage = DshSettingsUIMessage.safe(error)
             }
         }
         await holdRefreshAnimation(since: startedAt)
     }
 
     public func refreshPlugins() {
-        self.installedPlugins = DshPluginManager.shared.listPlugins(outdatedMap: outdatedPluginsMap)
-        refreshExternalTheme()
+        let directory = DshLaunchContext.profileDirectory(for: appProfile)
+        refreshPlugins(at: directory)
+    }
+
+    public func refreshPlugins(for context: DshLaunchContext) {
+        refreshPlugins(at: context.profileDirectory)
+    }
+
+    private func refreshPlugins(at directory: URL) {
+        self.installedPlugins = DshPluginManager.shared.listPlugins(
+            at: directory,
+            outdatedMap: outdatedPluginsMap
+        )
+        refreshExternalTheme(at: directory)
     }
 
     public func refreshPluginList() async {
@@ -282,37 +372,140 @@ public final class SettingsViewModel: ObservableObject {
         await holdRefreshAnimation(since: startedAt)
     }
 
+    /// Run the F03 dependency inspection against one captured launch context.
+    /// The operation is read-only and publishes only if the state still points
+    /// at that same Profile and Runtime when the detached scan returns.
+    public func inspectPlugins() async {
+        guard !isInspectingPlugins else { return }
+        isInspectingPlugins = true
+        pluginInspectionMessage = nil
+        defer { isInspectingPlugins = false }
+
+        do {
+            let inspected = try await MainWindowController.shared.withRuntimeOperation {
+                guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                    throw DshLaunchContextError.invalidProfileName
+                }
+                let runtimeEntry = DshVersionManager.shared.resolveEntry(for: context.runtimeDescriptor)
+                let runtimeRoot = runtimeEntry.map { entry in
+                    URL(fileURLWithPath: entry)
+                        .deletingLastPathComponent()
+                        .deletingLastPathComponent()
+                        .deletingLastPathComponent()
+                        .deletingLastPathComponent()
+                        .deletingLastPathComponent()
+                } ?? DshStateManager.versionsDirectory
+                let nodeBinary = NodeRuntime.shared.resolveNodeBinary().map(URL.init(fileURLWithPath:))
+                let result = await DshPluginInspector(
+                    profileDirectory: context.profileDirectory,
+                    runtime: DshPluginInspectorRuntimeDescriptor(
+                        root: runtimeRoot,
+                        nodeBinary: nodeBinary,
+                        integrityVerified: runtimeEntry != nil
+                    )
+                ).inspectAsync()
+                return (context, result)
+            }
+            guard inspected.0.isFresh(in: DshStateManager.shared.current) else { return }
+            pluginInspectionResult = inspected.1
+            let message = Self.pluginInspectionMessage(for: inspected.1)
+            pluginInspectionMessage = message
+            // A passing check is transient feedback; dismiss it after a few
+            // seconds so it does not linger. Problem reports stay until the
+            // next inspection because they require user action.
+            if message == Self.pluginInspectionPassedMessage {
+                let shown = message
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    if !isInspectingPlugins, pluginInspectionMessage == shown {
+                        pluginInspectionMessage = nil
+                    }
+                }
+            }
+        } catch {
+            pluginInspectionResult = nil
+            pluginInspectionMessage = "无法完成插件一致性检查：\(DshSettingsUIMessage.safe(error))"
+        }
+    }
+
+    public static let pluginInspectionPassedMessage = "插件依赖一致性检查通过。"
+
+    public static func pluginInspectionMessage(for result: DshPluginInspectionResult) -> String? {
+        if result.items.contains(where: { $0.status == .missingPackage }) {
+            return "发现包缺失；为保护现有 Profile，启动准备已阻止写入，请修复后重试。"
+        }
+        if result.items.contains(where: { $0.status == .notComposed }) {
+            return "发现已安装但未组合的 Bundle；为保护现有 Profile，启动准备已阻止写入。"
+        }
+        if result.items.contains(where: { $0.status == .duplicateBundle }) {
+            return "发现重复 Bundle 引用；归属无法唯一确认，未自动修改。"
+        }
+        if result.items.contains(where: { $0.status == .unavailable || $0.status == .uncertain })
+            || result.issues.contains(where: { $0.code == "patchInspectionUnavailable" }) {
+            return "部分插件配置无法确认；启动准备已阻止写入，请查看详情后重试。"
+        }
+        if result.hasProblems {
+            return "发现插件配置引用失效，请查看详情后重试。"
+        }
+        return pluginInspectionPassedMessage
+    }
+
     public func checkPluginUpdates() async {
         guard !isCheckingPluginUpdates else { return }
         isCheckingPluginUpdates = true
         let startedAt = Date()
         defer { isCheckingPluginUpdates = false }
         do {
-            let map = try await DshPluginManager.shared.checkOutdatedPlugins()
-            self.outdatedPluginsMap = map
-            self.installedPlugins = DshPluginManager.shared.listPlugins(outdatedMap: map)
+            try await MainWindowController.shared.withRuntimeOperation {
+                guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                    throw DshLaunchContextError.invalidProfileName
+                }
+                let map = try await DshPluginManager.shared.checkOutdatedPlugins(
+                    at: context.profileDirectory,
+                    profile: context.profile,
+                    registry: context.runtimeDescriptor.registry
+                )
+                self.outdatedPluginsMap = map
+                self.installedPlugins = DshPluginManager.shared.listPlugins(
+                    at: context.profileDirectory,
+                    outdatedMap: map
+                )
+            }
         } catch {
-            self.alertMessage = "检测插件更新失败：\(error.localizedDescription)"
+            self.alertMessage = "检测插件更新失败：\(DshSettingsUIMessage.safe(error))"
         }
         await holdRefreshAnimation(since: startedAt)
     }
 
     public func updatePlugin(name: String) {
+        guard pluginMutationsAllowed else { return }
         startPluginUpdate(name: name, ignoringMinimumReleaseAge: false)
     }
 
     public func updateAllPlugins() {
+        guard pluginMutationsAllowed else { return }
         startPluginUpdateAll(ignoringMinimumReleaseAge: false)
     }
 
     public func confirmPendingPluginUpdate() {
         guard let request = pendingPluginUpdate else { return }
-        pendingPluginUpdate = nil
+        guard pluginMutationsAllowed else {
+            alertMessage = "插件更新仍在等待恢复完成；请求已保留，请完成恢复后重试。"
+            return
+        }
+        guard !isOperatingPlugin, !isSwitchingProfile else {
+            alertMessage = "当前已有插件操作排队，请稍后重试。"
+            return
+        }
+        let queued: Bool
         switch request {
         case .plugin(let name):
-            startPluginUpdate(name: name, ignoringMinimumReleaseAge: true)
+            queued = startPluginUpdate(name: name, ignoringMinimumReleaseAge: true)
         case .all:
-            startPluginUpdateAll(ignoringMinimumReleaseAge: true)
+            queued = startPluginUpdateAll(ignoringMinimumReleaseAge: true)
+        }
+        if queued {
+            pendingPluginUpdate = nil
         }
     }
 
@@ -330,22 +523,36 @@ public final class SettingsViewModel: ObservableObject {
         }
     }
 
-    private func startPluginUpdate(name: String, ignoringMinimumReleaseAge: Bool) {
-        guard !isOperatingPlugin, !isSwitchingProfile else { return }
+    @discardableResult
+    private func startPluginUpdate(name: String, ignoringMinimumReleaseAge: Bool) -> Bool {
+        guard pluginMutationsAllowed else {
+            alertMessage = "插件更新暂不可用；请求已保留，请完成恢复后重试。"
+            return false
+        }
+        guard !isOperatingPlugin, !isSwitchingProfile else {
+            alertMessage = "当前已有插件操作排队，请稍后重试。"
+            return false
+        }
         isOperatingPlugin = true
         clearPluginStatus()
-        operatingPluginName = "正在更新 \(name)…"
+        operatingPluginName = DshSettingsUIMessage.safe("正在更新 \(name)…")
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
+                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                        throw DshLaunchContextError.invalidProfileName
+                    }
                     try await DshPluginManager.shared.updatePlugin(
                         name: name,
-                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
+                        profileDirectory: context.profileDirectory,
+                        profile: context.profile,
+                        registry: context.runtimeDescriptor.registry
                     )
                     self.outdatedPluginsMap.removeValue(forKey: name)
-                    self.refreshPlugins()
-                    try await self.restartDshServiceDuringOperationAndWait()
-                    self.refreshPlugins()
+                    self.refreshPlugins(for: context)
+                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
+                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -358,30 +565,45 @@ public final class SettingsViewModel: ObservableObject {
                     self.pendingPluginUpdate = .plugin(name)
                     return
                 }
-                self.alertMessage = error.localizedDescription
+                self.alertMessage = DshSettingsUIMessage.safe(error)
             }
         }
+        return true
     }
 
-    private func startPluginUpdateAll(ignoringMinimumReleaseAge: Bool) {
-        guard !isOperatingPlugin, !isSwitchingProfile else { return }
+    @discardableResult
+    private func startPluginUpdateAll(ignoringMinimumReleaseAge: Bool) -> Bool {
+        guard pluginMutationsAllowed else {
+            alertMessage = "插件更新暂不可用；请求已保留，请完成恢复后重试。"
+            return false
+        }
+        guard !isOperatingPlugin, !isSwitchingProfile else {
+            alertMessage = "当前已有插件操作排队，请稍后重试。"
+            return false
+        }
         isOperatingPlugin = true
         clearPluginStatus()
         let count = installedPlugins.filter(\.hasUpdate).count
-        operatingPluginName = count > 0
+        operatingPluginName = DshSettingsUIMessage.safe(count > 0
             ? "正在更新插件（共 \(count) 个）…"
-            : "正在更新插件…"
+            : "正在更新插件…")
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
+                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                        throw DshLaunchContextError.invalidProfileName
+                    }
                     try await DshPluginManager.shared.updateAllPlugins(
-                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
+                        profileDirectory: context.profileDirectory,
+                        profile: context.profile,
+                        registry: context.runtimeDescriptor.registry
                     )
                     self.outdatedPluginsMap.removeAll()
-                    self.refreshPlugins()
+                    self.refreshPlugins(for: context)
                     self.operatingPluginName = "插件更新完成，正在重启 DSH 服务…"
-                    try await self.restartDshServiceDuringOperationAndWait()
-                    self.refreshPlugins()
+                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
+                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -394,9 +616,10 @@ public final class SettingsViewModel: ObservableObject {
                     self.pendingPluginUpdate = .all
                     return
                 }
-                self.alertMessage = error.localizedDescription
+                self.alertMessage = DshSettingsUIMessage.safe(error)
             }
         }
+        return true
     }
 
     /// Start a one-way update to the selected npm `latest` version. The
@@ -411,6 +634,10 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     private func updateToChannel(_ channel: DshRuntimeChannel) {
+        guard pluginMutationsAllowed else {
+            alertMessage = "DSH 当前正在恢复未完成状态，请先完成恢复后再升级 Runtime。"
+            return
+        }
         guard appProfile == .desktop else {
             alertMessage = "web Profile 与终端共享，暂不允许升级 DSH Runtime；请切回 desktop Profile。"
             return
@@ -436,6 +663,10 @@ public final class SettingsViewModel: ObservableObject {
     /// active runtime. This remains separate from the UI so future channels
     /// can reuse the same transaction without restoring arbitrary switching.
     public func updateToVersion(_ version: String) {
+        guard pluginMutationsAllowed else {
+            alertMessage = "DSH 当前正在恢复未完成状态，请先完成恢复后再升级 Runtime。"
+            return
+        }
         guard appProfile == .desktop else {
             alertMessage = "web Profile 与终端共享，暂不允许升级 DSH Runtime；请切回 desktop Profile。"
             return
@@ -537,12 +768,12 @@ public final class SettingsViewModel: ObservableObject {
                         profile: snapshotProfile
                     ) { progress in
                         Task { @MainActor in
-                            self.installProgressPhase = progress.phase
-                            self.installProgressDetail = progress.detail
+                            self.installProgressPhase = DshSettingsUIMessage.safe(progress.phase)
+                            self.installProgressDetail = progress.detail.map(DshSettingsUIMessage.safe)
                         }
                     }
                 } catch {
-                    let diagnostic = "\(message) 但 web Profile 恢复失败，事务仍保留待下次启动重试：\(error.localizedDescription)"
+                    let diagnostic = "\(message) 但 web Profile 恢复失败，事务仍保留待下次启动重试：\(DshSettingsUIMessage.safe(error))"
                     DshStateManager.shared.update { state in
                         state.runtimeState = DshRuntimeTransaction.recordRollbackFailure(
                             state.runtimeState,
@@ -568,14 +799,14 @@ public final class SettingsViewModel: ObservableObject {
             do {
                 try DshVersionManager.shared.discardInstalledVersion(candidate.version)
             } catch {
-                finalMessage += " Candidate \(candidate.version) 清理失败：\(error.localizedDescription)"
+                finalMessage += " Candidate \(candidate.version) 清理失败：\(DshSettingsUIMessage.safe(error))"
                 DshStateManager.shared.update { $0.runtimeState.lastDiagnostic = finalMessage }
             }
             if let snapshotID {
                 do {
                     try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
                 } catch {
-                    finalMessage += " web Profile 快照清理失败：\(error.localizedDescription)"
+                    finalMessage += " web Profile 快照清理失败：\(DshSettingsUIMessage.safe(error))"
                     DshStateManager.shared.update { state in
                         state.runtimeState.webProfileSnapshotID = snapshotID
                         state.runtimeState.lastDiagnostic = finalMessage
@@ -609,22 +840,31 @@ public final class SettingsViewModel: ObservableObject {
         activeVersion: String?,
         previousVersion: String?,
         pendingVersion: String?,
-        snapshotID: String?
+        snapshotID: String?,
+        transactionID: String?
     ) -> Bool {
-        state.selectedVersion == selectedVersion
+        guard let transactionID else { return false }
+        return state.selectedVersion == selectedVersion
             && state.runtimeState.phase == phase
             && state.runtimeState.active?.version == activeVersion
             && state.runtimeState.previous?.version == previousVersion
             && state.runtimeState.pending?.version == pendingVersion
             && state.runtimeState.webProfileSnapshotID == snapshotID
+            && state.runtimeState.transactionID == transactionID
     }
 
     /// Count a successful app/service start after an update. Keep the old
     /// runtime until the new one has survived two starts, then remove only
     /// the exact recorded previous directory.
-    public func recordHealthyRuntimeStart() async {
+    public func recordHealthyRuntimeStart(for context: DshLaunchContext) async {
         let state = DshStateManager.shared.current
-        guard state.runtimeState.phase == .confirmed,
+        guard context.isFresh(in: state),
+              context.purpose == .normal,
+              let contextTransactionID = context.transactionID,
+              state.runtimeState.transactionID == contextTransactionID,
+              context.profile == state.runtimeState.profile,
+              context.runtimeDescriptor.version == state.runtimeState.active?.version,
+              state.runtimeState.phase == .confirmed,
               let previous = state.runtimeState.previous else { return }
 
         let expectedSelectedVersion = state.selectedVersion
@@ -632,6 +872,7 @@ public final class SettingsViewModel: ObservableObject {
         let expectedPreviousVersion = previous.version
         let expectedPendingVersion = state.runtimeState.pending?.version
         let expectedSnapshotID = state.runtimeState.webProfileSnapshotID
+        let expectedTransactionID = contextTransactionID
         let nextCount = state.runtimeState.healthyStartCount + 1
         guard nextCount >= 2 else {
             DshStateManager.shared.update { state in
@@ -642,7 +883,8 @@ public final class SettingsViewModel: ObservableObject {
                     activeVersion: expectedActiveVersion,
                     previousVersion: expectedPreviousVersion,
                     pendingVersion: expectedPendingVersion,
-                    snapshotID: expectedSnapshotID
+                    snapshotID: expectedSnapshotID,
+                    transactionID: expectedTransactionID
                 ), state.runtimeState.healthyStartCount == nextCount - 1 else { return }
                 state.runtimeState.healthyStartCount = nextCount
             }
@@ -667,7 +909,8 @@ public final class SettingsViewModel: ObservableObject {
             activeVersion: expectedActiveVersion,
             previousVersion: expectedPreviousVersion,
             pendingVersion: expectedPendingVersion,
-            snapshotID: expectedSnapshotID
+            snapshotID: expectedSnapshotID,
+            transactionID: expectedTransactionID
         ), stateAfterSnapshotCleanup.runtimeState.healthyStartCount == nextCount - 1 else { return }
 
         do {
@@ -681,15 +924,17 @@ public final class SettingsViewModel: ObservableObject {
                     activeVersion: expectedActiveVersion,
                     previousVersion: expectedPreviousVersion,
                     pendingVersion: expectedPendingVersion,
-                    snapshotID: expectedSnapshotID
+                    snapshotID: expectedSnapshotID,
+                    transactionID: expectedTransactionID
                 ), state.runtimeState.healthyStartCount == nextCount - 1 else { return }
                 didCommit = true
                 state.runtimeState.previous = nil
                 state.runtimeState.healthyStartCount = 0
                 state.runtimeState.phase = .idle
+                state.runtimeState.transactionID = nil
                 state.runtimeState.webProfileSnapshotID = snapshotCleanupError == nil ? nil : snapshotID
                 state.runtimeState.lastDiagnostic = snapshotCleanupError.map {
-                    "旧 Runtime 已清理，但 web Profile 快照清理失败：\($0.localizedDescription)"
+                    "旧 Runtime 已清理，但 web Profile 快照清理失败：\(DshSettingsUIMessage.safe($0))"
                 }
             }
             guard didCommit else { return }
@@ -702,11 +947,12 @@ public final class SettingsViewModel: ObservableObject {
                     activeVersion: expectedActiveVersion,
                     previousVersion: expectedPreviousVersion,
                     pendingVersion: expectedPendingVersion,
-                    snapshotID: expectedSnapshotID
+                    snapshotID: expectedSnapshotID,
+                    transactionID: expectedTransactionID
                 ) else { return }
                 state.runtimeState.healthyStartCount = nextCount
             }
-            self.alertMessage = "新 Runtime 已连续启动，但旧 Runtime 清理失败：\(error.localizedDescription)"
+            self.alertMessage = "新 Runtime 已连续启动，但旧 Runtime 清理失败：\(DshSettingsUIMessage.safe(error))"
         }
     }
 
@@ -729,7 +975,7 @@ public final class SettingsViewModel: ObservableObject {
                 state.runtimeState.lastDiagnostic = nil
             }
         } catch {
-            alertMessage = "web Profile 快照清理仍失败，将在下次启动继续重试：\(error.localizedDescription)"
+            alertMessage = "web Profile 快照清理仍失败，将在下次启动继续重试：\(DshSettingsUIMessage.safe(error))"
         }
     }
 
@@ -737,9 +983,15 @@ public final class SettingsViewModel: ObservableObject {
     /// could not be started during the original update attempt. The next app
     /// launch restores the Profile before starting the previous Runtime; once
     /// that start is healthy, this method can safely settle the transaction.
-    public func finalizeRecoveredRuntimeAfterSuccessfulStart() async {
+    public func finalizeRecoveredRuntimeAfterSuccessfulStart(for context: DshLaunchContext) async {
         let state = DshStateManager.shared.current
-        guard state.runtimeState.phase == .rollingBack,
+        guard context.isFresh(in: state),
+              context.purpose == .runtimeRollback,
+              let contextTransactionID = context.transactionID,
+              state.runtimeState.transactionID == contextTransactionID,
+              context.profile == state.runtimeState.profile,
+              context.runtimeDescriptor.version == state.runtimeState.previous?.version,
+              state.runtimeState.phase == .rollingBack,
               let active = state.runtimeState.previous,
               let candidate = state.runtimeState.pending,
               state.selectedVersion == active.version else { return }
@@ -749,11 +1001,12 @@ public final class SettingsViewModel: ObservableObject {
         let expectedPreviousVersion = active.version
         let expectedPendingVersion = candidate.version
         let snapshotID = state.runtimeState.webProfileSnapshotID
+        let expectedTransactionID = contextTransactionID
         var cleanupErrors: [String] = []
         do {
             try DshVersionManager.shared.discardInstalledVersion(candidate.version)
         } catch {
-            cleanupErrors.append("candidate 清理失败：\(error.localizedDescription)")
+            cleanupErrors.append("candidate 清理失败：\(DshSettingsUIMessage.safe(error))")
         }
 
         var retainedSnapshotID: String?
@@ -762,7 +1015,7 @@ public final class SettingsViewModel: ObservableObject {
                 try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
             } catch {
                 retainedSnapshotID = snapshotID
-                cleanupErrors.append("web Profile 快照清理失败：\(error.localizedDescription)")
+                cleanupErrors.append("web Profile 快照清理失败：\(DshSettingsUIMessage.safe(error))")
             }
         }
 
@@ -774,7 +1027,8 @@ public final class SettingsViewModel: ObservableObject {
             activeVersion: expectedActiveVersion,
             previousVersion: expectedPreviousVersion,
             pendingVersion: expectedPendingVersion,
-            snapshotID: snapshotID
+            snapshotID: snapshotID,
+            transactionID: expectedTransactionID
         ) else { return }
 
         let diagnostic = cleanupErrors.isEmpty ? nil : cleanupErrors.joined(separator: "；")
@@ -787,7 +1041,8 @@ public final class SettingsViewModel: ObservableObject {
                 activeVersion: expectedActiveVersion,
                 previousVersion: expectedPreviousVersion,
                 pendingVersion: expectedPendingVersion,
-                snapshotID: snapshotID
+                snapshotID: snapshotID,
+                transactionID: expectedTransactionID
             ) else { return }
             didCommit = true
             state.runtimeState = DshRuntimeTransaction.finishRollback(
@@ -805,7 +1060,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     private func runRuntimeUpdate(_ item: DshVersionItem, isAutomatic: Bool = false) async {
-        guard !isUpdatingRuntime else { return }
+        guard pluginMutationsAllowed, !isUpdatingRuntime else { return }
         guard DshStateManager.shared.current.appProfile == .desktop else {
             alertMessage = "web Profile 与终端共享，暂不允许升级 DSH Runtime；请切回 desktop Profile。"
             return
@@ -856,7 +1111,7 @@ public final class SettingsViewModel: ObservableObject {
                 state.runtimeState.dismissedAppVersion = currentAppVersion
             }
             syncRuntimeRecoveryState()
-            alertMessage = error.localizedDescription
+            alertMessage = DshSettingsUIMessage.safe(error)
         }
 
         isUpdatingRuntime = false
@@ -911,14 +1166,14 @@ public final class SettingsViewModel: ObservableObject {
                     expectedIntegrity: integrity
                 ) { progress in
                     Task { @MainActor in
-                        self.installProgressPhase = progress.phase
-                        self.installProgressDetail = progress.detail
+                        self.installProgressPhase = DshSettingsUIMessage.safe(progress.phase)
+                        self.installProgressDetail = progress.detail.map(DshSettingsUIMessage.safe)
                     }
                 }
             } catch {
                 throw DshRuntimeUpdateFailure.candidateInstall(
                     version: item.version,
-                    detail: error.localizedDescription
+                    detail: DshSettingsUIMessage.safe(error)
                 )
             }
 
@@ -935,7 +1190,7 @@ public final class SettingsViewModel: ObservableObject {
             } catch {
                 throw DshRuntimeUpdateFailure.runtimeStartup(
                     version: item.version,
-                    detail: error.localizedDescription
+                    detail: DshSettingsUIMessage.safe(error)
                 )
             }
 
@@ -943,7 +1198,7 @@ public final class SettingsViewModel: ObservableObject {
                 state.runtimeState = DshRuntimeTransaction.confirm(state.runtimeState)
             }
         } catch {
-            let failureDescription = error.localizedDescription
+            let failureDescription = DshSettingsUIMessage.safe(error)
             DshStateManager.shared.update { state in
                 state.selectedVersion = currentVersion
                 state.runtimeState = DshRuntimeTransaction.beginRollback(state.runtimeState)
@@ -960,7 +1215,7 @@ public final class SettingsViewModel: ObservableObject {
                 }
             }
             if let rollbackError {
-                let diagnostic = "Runtime 回滚失败：\(rollbackError.localizedDescription)"
+                let diagnostic = "Runtime 回滚失败：\(DshSettingsUIMessage.safe(rollbackError))"
                 DshStateManager.shared.update { state in
                     state.runtimeState = DshRuntimeTransaction.recordRollbackFailure(
                         state.runtimeState,
@@ -972,7 +1227,7 @@ public final class SettingsViewModel: ObservableObject {
                 throw NSError(
                     domain: "DshRuntimeUpdate",
                     code: -2,
-                    userInfo: [NSLocalizedDescriptionKey: "更新到 \(item.version) 失败：\(failureDescription)；自动恢复 \(active.version) 也失败：\(rollbackError.localizedDescription)"]
+                    userInfo: [NSLocalizedDescriptionKey: "更新到 \(item.version) 失败：\(failureDescription)；自动恢复 \(active.version) 也失败：\(DshSettingsUIMessage.safe(rollbackError))"]
                 )
             }
 
@@ -980,7 +1235,7 @@ public final class SettingsViewModel: ObservableObject {
             do {
                 try DshVersionManager.shared.discardInstalledVersion(item.version)
             } catch {
-                cleanupErrors.append("candidate 清理失败：\(error.localizedDescription)")
+                cleanupErrors.append("candidate 清理失败：\(DshSettingsUIMessage.safe(error))")
             }
             let snapshotID = DshStateManager.shared.current.runtimeState.webProfileSnapshotID
             var retainedSnapshotID: String?
@@ -989,7 +1244,7 @@ public final class SettingsViewModel: ObservableObject {
                     try await DshPluginManager.shared.deleteWebProfileSnapshot(snapshotID)
                 } catch {
                     retainedSnapshotID = snapshotID
-                    cleanupErrors.append("web Profile 快照清理失败：\(error.localizedDescription)")
+                    cleanupErrors.append("web Profile 快照清理失败：\(DshSettingsUIMessage.safe(error))")
                 }
             }
             let cleanupDiagnostic = cleanupErrors.isEmpty ? nil : cleanupErrors.joined(separator: "；")
@@ -1019,14 +1274,23 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func addPlugin(spec: String) {
-        guard pendingPluginInstallSpec == nil else { return }
+        guard pluginMutationsAllowed, pendingPluginInstallSpec == nil else { return }
         startPluginInstall(spec: spec, ignoringMinimumReleaseAge: false)
     }
 
     public func confirmPendingPluginInstall() {
         guard let spec = pendingPluginInstallSpec else { return }
-        pendingPluginInstallSpec = nil
-        startPluginInstall(spec: spec, ignoringMinimumReleaseAge: true)
+        guard pluginMutationsAllowed else {
+            alertMessage = "插件安装仍在等待恢复完成；请求已保留，请完成恢复后重试。"
+            return
+        }
+        guard !isOperatingPlugin, !isSwitchingProfile else {
+            alertMessage = "当前已有插件操作排队，请稍后重试。"
+            return
+        }
+        if startPluginInstall(spec: spec, ignoringMinimumReleaseAge: true) {
+            pendingPluginInstallSpec = nil
+        }
     }
 
     public func cancelPendingPluginInstall() {
@@ -1038,22 +1302,37 @@ public final class SettingsViewModel: ObservableObject {
         return "安装插件 \(spec) 时，npm 检测到依赖版本发布时间过近。继续安装将仅对本次操作使用 --config.minimum-release-age=0，不会修改全局 pnpm 配置。"
     }
 
-    private func startPluginInstall(spec: String, ignoringMinimumReleaseAge: Bool) {
+    @discardableResult
+    private func startPluginInstall(spec: String, ignoringMinimumReleaseAge: Bool) -> Bool {
         let trimmedSpec = spec.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !isOperatingPlugin, !isSwitchingProfile, !trimmedSpec.isEmpty else { return }
+        guard pluginMutationsAllowed else {
+            alertMessage = "插件安装暂不可用；请求已保留，请完成恢复后重试。"
+            return false
+        }
+        guard !isOperatingPlugin, !isSwitchingProfile else {
+            alertMessage = "当前已有插件操作排队，请稍后重试。"
+            return false
+        }
+        guard !trimmedSpec.isEmpty else { return false }
         isOperatingPlugin = true
         clearPluginStatus()
-        operatingPluginName = "正在安装插件 \(trimmedSpec)…"
+        operatingPluginName = DshSettingsUIMessage.safe("正在安装插件 \(trimmedSpec)…")
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
+                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                        throw DshLaunchContextError.invalidProfileName
+                    }
                     try await DshPluginManager.shared.addPlugin(
                         spec: trimmedSpec,
-                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
+                        profileDirectory: context.profileDirectory,
+                        profile: context.profile,
+                        registry: context.runtimeDescriptor.registry
                     )
-                    self.refreshPlugins()
-                    try await self.restartDshServiceDuringOperationAndWait()
-                    self.refreshPlugins()
+                    self.refreshPlugins(for: context)
+                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
+                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -1066,25 +1345,34 @@ public final class SettingsViewModel: ObservableObject {
                     self.pendingPluginInstallSpec = trimmedSpec
                     return
                 }
-                let message = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+                let message = DshSettingsUIMessage.safe(error).trimmingCharacters(in: .whitespacesAndNewlines)
                 self.alertMessage = message.isEmpty ? "安装插件 \(trimmedSpec) 失败" : message
             }
         }
+        return true
     }
 
     public func removePlugin(name: String) {
-        guard !isOperatingPlugin, !isSwitchingProfile else { return }
+        guard pluginMutationsAllowed, !isOperatingPlugin, !isSwitchingProfile else { return }
         isOperatingPlugin = true
         clearPluginStatus()
-        operatingPluginName = "正在卸载插件 \(name)…"
+        operatingPluginName = DshSettingsUIMessage.safe("正在卸载插件 \(name)…")
         Task {
             do {
                 try await MainWindowController.shared.withRuntimeOperation {
-                    try await DshPluginManager.shared.removePlugin(name: name)
+                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                        throw DshLaunchContextError.invalidProfileName
+                    }
+                    try await DshPluginManager.shared.removePlugin(
+                        name: name,
+                        profileDirectory: context.profileDirectory,
+                        profile: context.profile,
+                        registry: context.runtimeDescriptor.registry
+                    )
                     self.outdatedPluginsMap.removeValue(forKey: name)
-                    self.refreshPlugins()
-                    try await self.restartDshServiceDuringOperationAndWait()
-                    self.refreshPlugins()
+                    self.refreshPlugins(for: context)
+                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
+                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
@@ -1092,12 +1380,22 @@ public final class SettingsViewModel: ObservableObject {
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.alertMessage = error.localizedDescription
+                self.alertMessage = DshSettingsUIMessage.safe(error)
             }
         }
     }
 
     public func saveGeneralSettings() {
+        let stateBeforeSave = DshStateManager.shared.current
+        let profileMutationAllowed = pluginMutationsAllowed
+        if !profileMutationAllowed, appProfile != stateBeforeSave.appProfile {
+            // A binding or an older caller may have changed the published
+            // value before reaching this persistence boundary. Restore the
+            // durable Profile while still allowing unrelated appearance and
+            // access settings to be saved.
+            appProfile = stateBeforeSave.appProfile
+        }
+        let profileToPersist = profileMutationAllowed ? appProfile : stateBeforeSave.appProfile
         let persistedExposure = browserAccessEnabled ? networkExposure : .loopback
         if networkExposure != persistedExposure {
             networkExposure = persistedExposure
@@ -1119,7 +1417,7 @@ public final class SettingsViewModel: ObservableObject {
         npmRegistry = normalizedRegistry
         DshStateManager.shared.update { state in
             state.dshPort = dshPort
-            state.appProfile = appProfile
+            state.appProfile = profileToPersist
             state.npmRegistry = normalizedRegistry
             state.uiTheme = uiTheme
             state.translateCommands = translateCommands
@@ -1136,7 +1434,8 @@ public final class SettingsViewModel: ObservableObject {
     /// default desktop profile is isolated from terminal `dsh web`; selecting
     /// web is an explicit opt-in to sharing its plugin and dependency tree.
     public func setAppProfile(_ profile: DshAppProfile) {
-        guard profile != appProfile,
+        guard pluginMutationsAllowed,
+              profile != appProfile,
               !isSwitchingProfile,
               !isOperatingPlugin,
               !isUpdatingRuntime,
@@ -1179,10 +1478,13 @@ public final class SettingsViewModel: ObservableObject {
         Task { [self] in
             do {
                 let cleanupError = try await MainWindowController.shared.withRuntimeOperation { () -> Error? in
+                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                        throw DshLaunchContextError.invalidProfileName
+                    }
                     if leavingSharedWeb {
                         await DshService.shared.stopAndWait()
                     }
-                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation()
+                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
 
                     var cleanupError: Error?
                     var finalizingTransaction = transaction
@@ -1196,7 +1498,10 @@ public final class SettingsViewModel: ObservableObject {
                             state.pendingProfileSwitch = finalizingTransaction
                         }
                         do {
-                            try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+                            try await DshPluginManager.shared.removeDesktopHostArtifacts(
+                                from: .web,
+                                registry: context.runtimeDescriptor.registry
+                            )
                         } catch {
                             cleanupError = error
                         }
@@ -1209,7 +1514,8 @@ public final class SettingsViewModel: ObservableObject {
                     DshStateManager.shared.update { state in
                         guard let pending = state.pendingProfileSwitch,
                               pending.from == transaction.from,
-                              pending.to == transaction.to else { return }
+                              pending.to == transaction.to,
+                              pending.transactionID == transaction.transactionID else { return }
                         state.appProfile = profile
                         state.pendingProfileSwitch = cleanupError == nil ? nil : finalizingTransaction
                     }
@@ -1218,7 +1524,7 @@ public final class SettingsViewModel: ObservableObject {
                 self.refreshPlugins()
                 self.isSwitchingProfile = false
                 if let cleanupError {
-                    self.alertMessage = "已切换到 \(profile.rawValue) Profile，服务已重启，但 web 桥接清理失败，将在下次启动重试：\(cleanupError.localizedDescription)"
+                    self.alertMessage = "已切换到 \(profile.rawValue) Profile，服务已重启，但 web 桥接清理失败，将在下次启动重试：\(DshSettingsUIMessage.safe(cleanupError))"
                 } else {
                     self.showPluginStatus("已切换到 \(profile.rawValue) Profile，服务已重启")
                 }
@@ -1236,11 +1542,17 @@ public final class SettingsViewModel: ObservableObject {
                 var restoreCleanupError: Error?
                 do {
                     restoreCleanupError = try await MainWindowController.shared.withRuntimeOperation { () -> Error? in
+                        guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
+                            throw DshLaunchContextError.invalidProfileName
+                        }
                         await DshService.shared.stopAndWait()
                         var cleanupError: Error?
                         if profile == .web && previous == .desktop {
                             do {
-                                try await DshPluginManager.shared.removeDesktopHostArtifacts(from: .web)
+                                try await DshPluginManager.shared.removeDesktopHostArtifacts(
+                                    from: .web,
+                                    registry: context.runtimeDescriptor.registry
+                                )
                             } catch {
                                 // Bridge cleanup is app-owned housekeeping. It
                                 // must not prevent the known-good desktop
@@ -1249,7 +1561,7 @@ public final class SettingsViewModel: ObservableObject {
                                 cleanupError = error
                             }
                         }
-                        _ = try await MainWindowController.shared.restartDshServiceDuringOperation()
+                        _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
                         DshStateManager.shared.update { state in
                             guard state.pendingProfileSwitch == transaction else { return }
                             state.appProfile = previous
@@ -1263,11 +1575,11 @@ public final class SettingsViewModel: ObservableObject {
                 }
                 self.isSwitchingProfile = false
                 if let restoreError {
-                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，原 Profile 也无法恢复：\(restoreError.localizedDescription)"
+                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，原 Profile 也无法恢复：\(DshSettingsUIMessage.safe(restoreError))"
                 } else if let restoreCleanupError {
-                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile，但 web 桥接清理失败，将在下次启动重试：\(restoreCleanupError.localizedDescription)"
+                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile，但 web 桥接清理失败，将在下次启动重试：\(DshSettingsUIMessage.safe(restoreCleanupError))"
                 } else {
-                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile：\(error.localizedDescription)"
+                    self.alertMessage = "切换到 \(profile.rawValue) Profile 失败，已恢复 \(previous.rawValue) Profile：\(DshSettingsUIMessage.safe(error))"
                 }
             }
         }
@@ -1299,7 +1611,7 @@ public final class SettingsViewModel: ObservableObject {
             } catch {
                 DshStateManager.shared.update { $0.browserAccessEnabled = previous }
                 self.browserAccessEnabled = previous
-                self.alertMessage = "更新浏览器访问设置失败：\(error.localizedDescription)"
+                self.alertMessage = "更新浏览器访问设置失败：\(DshSettingsUIMessage.safe(error))"
             }
             self.isUpdatingBrowserAccess = false
         }
@@ -1327,7 +1639,7 @@ public final class SettingsViewModel: ObservableObject {
                 if target == .loopback { self.lanURL = nil }
             } catch {
                 self.networkExposure = previous
-                self.alertMessage = "更新局域网访问设置失败：\(error.localizedDescription)"
+                self.alertMessage = "更新局域网访问设置失败：\(DshSettingsUIMessage.safe(error))"
             }
             self.isUpdatingNetworkExposure = false
         }
@@ -1342,7 +1654,7 @@ public final class SettingsViewModel: ObservableObject {
             do {
                 self.lanURL = try await MainWindowController.shared.fetchLANURL()
             } catch {
-                self.alertMessage = "获取局域网地址失败：\(error.localizedDescription)"
+                self.alertMessage = "获取局域网地址失败：\(DshSettingsUIMessage.safe(error))"
             }
             self.isLoadingLANURL = false
         }
@@ -1360,7 +1672,7 @@ public final class SettingsViewModel: ObservableObject {
                 pasteboard.setString(url.absoluteString, forType: .string)
                 self.showPluginStatus("局域网访问地址已复制（10 分钟内有效）")
             } catch {
-                self.alertMessage = "获取局域网地址失败：\(error.localizedDescription)"
+                self.alertMessage = "获取局域网地址失败：\(DshSettingsUIMessage.safe(error))"
             }
             self.isLoadingLANURL = false
         }
@@ -1376,7 +1688,7 @@ public final class SettingsViewModel: ObservableObject {
                     throw MainWindowController.BrowserURLError.openFailed
                 }
             } catch {
-                self.alertMessage = "打开浏览器失败：\(error.localizedDescription)"
+                self.alertMessage = "打开浏览器失败：\(DshSettingsUIMessage.safe(error))"
             }
             self.isOpeningBrowser = false
         }

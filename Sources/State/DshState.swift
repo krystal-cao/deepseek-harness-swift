@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum DshNetworkExposure: String, Codable, Sendable {
     case loopback
@@ -71,17 +72,80 @@ public struct DshProfileSwitchTransaction: Codable, Equatable, Sendable {
     public var to: DshAppProfile
     public var phase: DshProfileSwitchPhase
     public var startedAt: Date
+    /// Stable identity for one persisted Profile switch. Older state files
+    /// did not carry this field; decoding derives a deterministic legacy
+    /// identity so that recovery can still finish safely without accepting a
+    /// nil-to-nil transaction match.
+    public var transactionID: String
 
     public init(
         from: DshAppProfile,
         to: DshAppProfile,
         phase: DshProfileSwitchPhase = .switching,
-        startedAt: Date = Date()
+        startedAt: Date = Date(),
+        transactionID: String = UUID().uuidString
     ) {
+        precondition(!transactionID.isEmpty, "Profile switch transaction ID must not be empty")
         self.from = from
         self.to = to
         self.phase = phase
         self.startedAt = startedAt
+        self.transactionID = transactionID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case from
+        case to
+        case phase
+        case startedAt
+        case transactionID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let source = try container.decode(DshAppProfile.self, forKey: .from)
+        let target = try container.decode(DshAppProfile.self, forKey: .to)
+        let phase = try container.decodeIfPresent(DshProfileSwitchPhase.self, forKey: .phase) ?? .switching
+        let startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date(timeIntervalSince1970: 0)
+        self.from = source
+        self.to = target
+        self.phase = phase
+        self.startedAt = startedAt
+        let persistedID = try container.decodeIfPresent(String.self, forKey: .transactionID)
+        self.transactionID = persistedID?.isEmpty == false
+            ? persistedID!
+            : Self.legacyTransactionID(
+                from: source,
+                to: target,
+                phase: phase,
+                startedAt: startedAt
+            )
+    }
+
+    private struct LegacyIdentity: Encodable {
+        let from: String
+        let to: String
+        let phase: String
+        let startedAt: String
+    }
+
+    private static func legacyTransactionID(
+        from: DshAppProfile,
+        to: DshAppProfile,
+        phase: DshProfileSwitchPhase,
+        startedAt: Date
+    ) -> String {
+        let identity = LegacyIdentity(
+            from: from.rawValue,
+            to: to.rawValue,
+            phase: phase.rawValue,
+            startedAt: String(format: "%.17g", startedAt.timeIntervalSinceReferenceDate)
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(identity)) ?? Data()
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return "legacy-profile-" + digest
     }
 }
 
@@ -133,6 +197,10 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
     public var webProfileSnapshotID: String?
     public var healthyStartCount: Int
     public var lastDiagnostic: String?
+    /// Identity of the Runtime transaction that owns pending/confirmed
+    /// cleanup state. It is retained through the confirmed health-count
+    /// window and cleared when the transaction settles idle.
+    public var transactionID: String?
 
     public init(
         active: NpmRuntimeDescriptor? = nil,
@@ -146,7 +214,8 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         dismissedAppVersion: String? = nil,
         webProfileSnapshotID: String? = nil,
         healthyStartCount: Int = 0,
-        lastDiagnostic: String? = nil
+        lastDiagnostic: String? = nil,
+        transactionID: String? = nil
     ) {
         self.active = active
         self.previous = previous
@@ -160,6 +229,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         self.webProfileSnapshotID = webProfileSnapshotID
         self.healthyStartCount = healthyStartCount
         self.lastDiagnostic = lastDiagnostic
+        self.transactionID = transactionID
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -175,6 +245,7 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         case webProfileSnapshotID
         case healthyStartCount
         case lastDiagnostic
+        case transactionID
     }
 
     public init(from decoder: Decoder) throws {
@@ -196,6 +267,84 @@ public struct DshRuntimeState: Codable, Equatable, Sendable {
         self.webProfileSnapshotID = try container.decodeIfPresent(String.self, forKey: .webProfileSnapshotID)
         self.healthyStartCount = try container.decodeIfPresent(Int.self, forKey: .healthyStartCount) ?? 0
         self.lastDiagnostic = try container.decodeIfPresent(String.self, forKey: .lastDiagnostic)
+        let persistedID = try container.decodeIfPresent(String.self, forKey: .transactionID)
+        if phase == .idle {
+            // Idle state has no transaction owner. Preserve a non-empty value
+            // only for forward compatibility with writers that retain one.
+            self.transactionID = persistedID?.isEmpty == false ? persistedID : nil
+        } else if persistedID?.isEmpty == false {
+            self.transactionID = persistedID!
+        } else {
+            // Legacy transactions had no owner ID. Derive one from every
+            // persisted identity field, including full-precision descriptor
+            // timestamps, so recovery can proceed without accepting a nil ID
+            // and adjacent millisecond transactions cannot collide.
+            self.transactionID = Self.legacyTransactionID(
+                active: active,
+                previous: previous,
+                pending: pending,
+                profile: self.profile,
+                phase: self.phase,
+                updatePolicy: self.updatePolicy,
+                channel: self.channel,
+                webProfileSnapshotID: self.webProfileSnapshotID
+            )
+        }
+    }
+
+    private struct LegacyDescriptor: Encodable {
+        let version: String
+        let registry: String
+        let integrity: String?
+        let installedAt: String
+    }
+
+    private struct LegacyIdentity: Encodable {
+        let active: LegacyDescriptor?
+        let previous: LegacyDescriptor?
+        let pending: LegacyDescriptor?
+        let profile: String
+        let phase: String
+        let updatePolicy: String
+        let channel: String
+        let webProfileSnapshotID: String?
+    }
+
+    private static func legacyTransactionID(
+        active: NpmRuntimeDescriptor?,
+        previous: NpmRuntimeDescriptor?,
+        pending: NpmRuntimeDescriptor?,
+        profile: DshAppProfile,
+        phase: DshRuntimeTransactionPhase,
+        updatePolicy: DshRuntimeUpdatePolicy,
+        channel: DshRuntimeChannel,
+        webProfileSnapshotID: String?
+    ) -> String {
+        func descriptor(_ value: NpmRuntimeDescriptor?) -> LegacyDescriptor? {
+            value.map {
+                LegacyDescriptor(
+                    version: $0.version,
+                    registry: $0.registry,
+                    integrity: $0.integrity,
+                    installedAt: String(format: "%.17g", $0.installedAt.timeIntervalSinceReferenceDate)
+                )
+            }
+        }
+        let identity = LegacyIdentity(
+            active: descriptor(active),
+            previous: descriptor(previous),
+            pending: descriptor(pending),
+            profile: profile.rawValue,
+            phase: phase.rawValue,
+            updatePolicy: updatePolicy.rawValue,
+            channel: channel.rawValue,
+            webProfileSnapshotID: webProfileSnapshotID
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(identity)) ?? Data()
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        return "legacy-runtime-" + digest
     }
 
     public static let `default` = DshRuntimeState()
@@ -240,9 +389,11 @@ public enum DshRuntimeTransaction {
         candidate: NpmRuntimeDescriptor,
         updatePolicy: DshRuntimeUpdatePolicy,
         channel: DshRuntimeChannel,
-        profile: DshAppProfile = .desktop
+        profile: DshAppProfile = .desktop,
+        transactionID: String = UUID().uuidString
     ) -> DshRuntimeState {
-        DshRuntimeState(
+        precondition(!transactionID.isEmpty, "Runtime transaction ID must not be empty")
+        return DshRuntimeState(
             active: active,
             previous: active,
             pending: candidate,
@@ -251,7 +402,8 @@ public enum DshRuntimeTransaction {
             updatePolicy: updatePolicy,
             channel: channel,
             healthyStartCount: 0,
-            lastDiagnostic: nil
+            lastDiagnostic: nil,
+            transactionID: transactionID
         )
     }
 
@@ -321,6 +473,7 @@ public enum DshRuntimeTransaction {
         next.phase = .idle
         next.webProfileSnapshotID = retainedWebProfileSnapshotID
         next.healthyStartCount = 0
+        next.transactionID = nil
         return next
     }
 }
@@ -454,7 +607,18 @@ public final class DshStateManager {
     private let fileURL: URL
 
     public static var appSupportDirectory: URL {
+#if DSH_TESTING
+        // Test-only seam: production builds retain the normal per-user
+        // Application Support location. Test binaries must opt in to an
+        // explicit temporary root so fixture runs cannot touch user state.
+        guard let override = ProcessInfo.processInfo.environment["DSH_TEST_APP_SUPPORT"],
+              !override.isEmpty else {
+            fatalError("DSH_TESTING requires DSH_TEST_APP_SUPPORT")
+        }
+        let appSupport = URL(fileURLWithPath: override, isDirectory: true)
+#else
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+#endif
         let dshDir = appSupport.appendingPathComponent("DSH", isDirectory: true)
         if !FileManager.default.fileExists(atPath: dshDir.path) {
             try? FileManager.default.createDirectory(at: dshDir, withIntermediateDirectories: true)
