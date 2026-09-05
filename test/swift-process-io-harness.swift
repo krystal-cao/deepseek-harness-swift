@@ -15,6 +15,8 @@ struct ProcessIOHarness {
         let rendererToken = "1234567890123456789012345678901234567890123"
         let cookieSecret = "cookie-secret"
         let authorizationSecret = "authorization-secret"
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let shortJSONSamples = #"{"token":"abc"} {"cookie":"sid=abc"} {"authorization":"Bearer abc"}"#
         let conflict = CommandLine.arguments.contains("--conflict")
         let lateWait = CommandLine.arguments.contains("--late-wait")
 
@@ -59,6 +61,8 @@ struct ProcessIOHarness {
         printf 'Cookie: dsh_swift_renderer=\(rendererToken); dsh-auth-fixture=\(cookieSecret)\\n' >&2;
         printf 'Authorization: Bearer \(authorizationSecret)\\n' >&2;
         printf 'URL: http://127.0.0.1:3187/?token=percent%%2Bsecret%%2F%%3D\\n' >&2;
+        printf '%s\\n' '\(shortJSONSamples)' >&2;
+        printf 'path: \(homePath)/diagnostics\\n' >&2;
         \(secondReady)
         printf 'dsh desktop control ready: \(generation.uuidString)\\n';
         sleep 1
@@ -118,6 +122,9 @@ struct ProcessIOHarness {
         }
         require(diagnostics.contains("http://127.0.0.1:3187/"), "diagnostic should retain the safe origin")
         require(diagnostics.contains("[REDACTED]"), "diagnostic should show redaction marker")
+        for sample in ["\"abc\"", "sid=abc", "Bearer abc", homePath] {
+            require(!diagnostics.contains(sample), "diagnostic leaked short fixture \(sample)")
+        }
 
         process.terminate()
         while process.isRunning { usleep(10_000) }

@@ -53,6 +53,10 @@
 		E00000000000000000000043 /* RecoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000065 /* RecoveryView.swift */; };
 		E00000000000000000000044 /* DshBridgeMessageValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000068 /* DshBridgeMessageValidator.swift */; };
 		E00000000000000000000045 /* DshPluginInspector.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000069 /* DshPluginInspector.swift */; };
+		E00000000000000000000046 /* DshPluginOperationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000070 /* DshPluginOperationState.swift */; };
+		E00000000000000000000047 /* DshPluginOperationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000071 /* DshPluginOperationCoordinator.swift */; };
+		E00000000000000000000048 /* DshPluginFailureResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000072 /* DshPluginFailureResolver.swift */; };
+		E00000000000000000000049 /* DshDiagnosticExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D00000000000000000000073 /* DshDiagnosticExporter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -104,6 +108,10 @@
 		D00000000000000000000065 /* RecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecoveryView.swift; sourceTree = "<group>"; };
 		D00000000000000000000068 /* DshBridgeMessageValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshBridgeMessageValidator.swift; sourceTree = "<group>"; };
 		D00000000000000000000069 /* DshPluginInspector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshPluginInspector.swift; sourceTree = "<group>"; };
+		D00000000000000000000070 /* DshPluginOperationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshPluginOperationState.swift; sourceTree = "<group>"; };
+		D00000000000000000000071 /* DshPluginOperationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshPluginOperationCoordinator.swift; sourceTree = "<group>"; };
+		D00000000000000000000072 /* DshPluginFailureResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshPluginFailureResolver.swift; sourceTree = "<group>"; };
+		D00000000000000000000073 /* DshDiagnosticExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DshDiagnosticExporter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -213,6 +221,9 @@
 			children = (
 				D00000000000000000000018 /* DshPluginManager.swift */,
 				D00000000000000000000069 /* DshPluginInspector.swift */,
+				D00000000000000000000070 /* DshPluginOperationState.swift */,
+				D00000000000000000000071 /* DshPluginOperationCoordinator.swift */,
+				D00000000000000000000072 /* DshPluginFailureResolver.swift */,
 			);
 			path = Plugins;
 			sourceTree = "<group>";
@@ -280,6 +291,7 @@
 			children = (
 				D00000000000000000000060 /* DshDiagnostic.swift */,
 				D00000000000000000000061 /* DshDiagnosticStore.swift */,
+				D00000000000000000000073 /* DshDiagnosticExporter.swift */,
 			);
 			path = Diagnostics;
 			sourceTree = "<group>";
@@ -439,6 +451,10 @@
 				E00000000000000000000043 /* RecoveryView.swift in Sources */,
 				E00000000000000000000044 /* DshBridgeMessageValidator.swift in Sources */,
 				E00000000000000000000045 /* DshPluginInspector.swift in Sources */,
+				E00000000000000000000046 /* DshPluginOperationState.swift in Sources */,
+				E00000000000000000000047 /* DshPluginOperationCoordinator.swift in Sources */,
+				E00000000000000000000048 /* DshPluginFailureResolver.swift in Sources */,
+				E00000000000000000000049 /* DshDiagnosticExporter.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

@@ -31,6 +31,17 @@ public enum DshPendingPluginUpdate: Equatable, Sendable {
     case all
 }
 
+/// Result of the read-only update resolver.  A preflight is deliberately
+/// advisory: registry/network failures are reported as `inconclusive` so the
+/// normal P01 transaction remains the source of truth.  Only a confirmed
+/// minimum-release-age rejection is safe to surface before stopping the
+/// service or creating a rollback snapshot.
+public enum DshPluginUpdatePreflightResult: Equatable, Sendable {
+    case clear
+    case minimumReleaseAgeViolation
+    case inconclusive
+}
+
 /// Read-only classification used by launch integration before any Profile
 /// bootstrap write. A missing manifest is safe to bootstrap only when the
 /// selected directory is genuinely empty; an existing but incomplete tree is
@@ -137,6 +148,21 @@ private final class DshProcessOutputCollector: @unchecked Sendable {
     }
 }
 
+private enum DshPluginOperationCoding {
+    static func encode(_ reference: DshPluginOperationSnapshotReference) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(reference)
+    }
+
+    static func decode(_ data: Data) throws -> DshPluginOperationSnapshotReference {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(DshPluginOperationSnapshotReference.self, from: data)
+    }
+}
+
 public final class DshPluginManager {
     public static let shared = DshPluginManager()
 
@@ -166,6 +192,11 @@ public final class DshPluginManager {
     ]
     private static let profileWorkspaceFileName = "pnpm-workspace.yaml"
     private static let webProfileSnapshotDirectoryName = "dsh-runtime-profile-snapshots"
+    /// P01 snapshots live in their own namespace.  Runtime snapshots and
+    /// plugin-operation snapshots must never be selected by one another's
+    /// cleanup code.
+    private static let pluginOperationSnapshotDirectoryName = "dsh-plugin-operation-snapshots"
+    private static let pluginOperationSnapshotMetadataName = "snapshot.json"
     private static let missingProfileMarkerName = ".profile-was-missing"
     /// A cleanup marker is written only after the managed bridge and its
     /// internal peer have been installed and fingerprinted successfully.
@@ -194,6 +225,11 @@ public final class DshPluginManager {
             .appendingPathComponent(Self.webProfileSnapshotDirectoryName, isDirectory: true)
     }
 
+    private static var pluginOperationSnapshotDirectory: URL {
+        DshStateManager.appSupportDirectory
+            .appendingPathComponent(Self.pluginOperationSnapshotDirectoryName, isDirectory: true)
+    }
+
     private static func webProfileSnapshotURL(for id: String) throws -> URL {
         guard UUID(uuidString: id) != nil, !id.contains("/") else {
             throw NSError(
@@ -205,7 +241,30 @@ public final class DshPluginManager {
         return webProfileSnapshotDirectory.appendingPathComponent(id, isDirectory: true)
     }
 
-    private static let snapshotSafetyBytes: Int64 = 256 * 1024 * 1024
+    private static func pluginOperationSnapshotURL(
+        operationID: String,
+        snapshotID: String
+    ) throws -> URL {
+        guard UUID(uuidString: operationID) != nil,
+              UUID(uuidString: snapshotID) != nil,
+              !operationID.contains("/"),
+              !snapshotID.contains("/") else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -40,
+                userInfo: [NSLocalizedDescriptionKey: "插件事务快照标识无效"]
+            )
+        }
+        return pluginOperationSnapshotDirectory
+            .appendingPathComponent(operationID, isDirectory: true)
+            .appendingPathComponent(snapshotID, isDirectory: true)
+    }
+
+    /// Extra headroom for metadata, temporary clone/copy state, and the
+    /// atomic destination replacement.  Exposed as a constant so the
+    /// capacity contract can be tested with measured values rather than
+    /// manufacturing a nearly-full volume.
+    public static let pluginSnapshotSafetyBytes: Int64 = 256 * 1024 * 1024
 
     private static func volumeIdentifier(for url: URL) -> String? {
         guard let values = try? url.resourceValues(forKeys: [.volumeIdentifierKey]) else { return nil }
@@ -237,6 +296,30 @@ public final class DshPluginManager {
         return total
     }
 
+    /// Validate the capacity contract independently from the filesystem.
+    /// Snapshot callers provide the payload size and the destination volume's
+    /// available bytes; the method adds the fixed safety margin and fails
+    /// closed with a typed error.  This seam is intentionally side-effect
+    /// free so tests never need to fill a real disk.
+    public static func validatePluginSnapshotCapacity(
+        requiredBytes: Int64,
+        availableBytes: Int64
+    ) throws {
+        let boundedRequired = max(requiredBytes, 0)
+        let requiredWithSafety: Int64
+        if boundedRequired > Int64.max - pluginSnapshotSafetyBytes {
+            requiredWithSafety = Int64.max
+        } else {
+            requiredWithSafety = boundedRequired + pluginSnapshotSafetyBytes
+        }
+        guard availableBytes >= requiredWithSafety else {
+            throw DshPluginOperationError.snapshotCapacityInsufficient(
+                requiredBytes: requiredWithSafety,
+                availableBytes: availableBytes
+            )
+        }
+    }
+
     private static func ensureCapacity(for source: URL, at destinationParent: URL) throws {
         let required = allocatedSize(of: source)
         let availableValues = try destinationParent.resourceValues(forKeys: [
@@ -249,20 +332,11 @@ public final class DshPluginManager {
         } else {
             available = Int64(availableValues.volumeAvailableCapacity ?? 0)
         }
-        let requiredWithSafety = Int64(min(required, UInt64(Int64.max - snapshotSafetyBytes))) + snapshotSafetyBytes
-        guard available >= requiredWithSafety else {
-            let requiredGB = Double(requiredWithSafety) / 1_073_741_824.0
-            let availableGB = Double(max(available, 0)) / 1_073_741_824.0
-            throw NSError(
-                domain: "DshPluginManager",
-                code: -35,
-                userInfo: [NSLocalizedDescriptionKey: String(
-                    format: "web Profile 所在磁盘空间不足，需要至少 %.2f GB，可用 %.2f GB",
-                    requiredGB,
-                    availableGB
-                )]
-            )
-        }
+        let boundedRequired = Int64(min(required, UInt64(Int64.max)))
+        try validatePluginSnapshotCapacity(
+            requiredBytes: boundedRequired,
+            availableBytes: available
+        )
     }
 
     /// APFS clone is effectively metadata-only for a large Profile. If the
@@ -313,6 +387,336 @@ public final class DshPluginManager {
         guard (try? process.run()) != nil else { return false }
         process.waitUntilExit()
         return process.terminationStatus == 0
+    }
+
+    /// Return a deterministic digest of a Profile tree.  This is used as a
+    /// compare-before-write/compare-before-restore guard, not as a security
+    /// signature.  Symlink targets are included as links rather than followed
+    /// so a Profile cannot make the snapshot digest walk outside its tree.
+    private static func pluginProfileDigestSynchronously(at profileURL: URL) throws -> String {
+        let fileManager = FileManager.default
+        var hasher = SHA256()
+        let root = profileURL.standardizedFileURL
+        guard fileManager.fileExists(atPath: root.path) else {
+            hasher.update(data: Data("missing\0".utf8))
+            return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        }
+
+        guard let enumerator = fileManager.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: []
+        ) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -41,
+                userInfo: [NSLocalizedDescriptionKey: "无法读取插件 Profile 内容"]
+            )
+        }
+
+        var entries: [URL] = []
+        while let entry = enumerator.nextObject() as? URL {
+            entries.append(entry)
+        }
+        for entry in entries.sorted(by: { $0.path < $1.path }) {
+            let relative = String(entry.standardizedFileURL.path.dropFirst(root.path.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            hasher.update(data: Data(relative.utf8))
+            hasher.update(data: Data([0]))
+            if let symlinkTarget = try? fileManager.destinationOfSymbolicLink(atPath: entry.path) {
+                hasher.update(data: Data("link\0".utf8))
+                hasher.update(data: Data(symlinkTarget.utf8))
+            } else if values.isDirectory == true {
+                hasher.update(data: Data("directory\0".utf8))
+            } else {
+                hasher.update(data: Data("file\0".utf8))
+                hasher.update(data: try Data(contentsOf: entry))
+            }
+            hasher.update(data: Data([0]))
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Public read-only digest seam for the P01 coordinator and isolated
+    /// integration harnesses.
+    public func pluginProfileDigest(at profileDirectory: URL) async throws -> String {
+        try await Task.detached(priority: .utility) {
+            try Self.pluginProfileDigestSynchronously(at: profileDirectory)
+        }.value
+    }
+
+    private static func writePluginSnapshotMetadata(
+        _ reference: DshPluginOperationSnapshotReference,
+        at snapshotURL: URL
+    ) throws {
+        let data = try DshPluginOperationCoding.encode(reference)
+        try data.write(
+            to: snapshotURL.appendingPathComponent(Self.pluginOperationSnapshotMetadataName),
+            options: .atomic
+        )
+    }
+
+    private static func readPluginSnapshotMetadata(
+        at snapshotURL: URL
+    ) throws -> DshPluginOperationSnapshotReference {
+        let metadataURL = snapshotURL.appendingPathComponent(Self.pluginOperationSnapshotMetadataName)
+        let data: Data
+        do {
+            data = try Data(contentsOf: metadataURL)
+        } catch {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -42,
+                userInfo: [NSLocalizedDescriptionKey: "插件事务快照所有权记录缺失"]
+            )
+        }
+        do {
+            return try DshPluginOperationCoding.decode(data)
+        } catch {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -43,
+                userInfo: [NSLocalizedDescriptionKey: "插件事务快照所有权记录损坏"]
+            )
+        }
+    }
+
+    private static func requireOwnedPluginSnapshot(
+        _ requested: DshPluginOperationSnapshotReference,
+        at snapshotURL: URL
+    ) throws {
+        let persisted = try readPluginSnapshotMetadata(at: snapshotURL)
+        guard persisted.snapshotID == requested.snapshotID,
+              persisted.operationID == requested.operationID,
+              persisted.profile == requested.profile,
+              persisted.profileDirectory == requested.profileDirectory,
+              persisted.baselineDigest == requested.baselineDigest,
+              persisted.ownerID == DshPluginOperationSnapshotReference.owner else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -44,
+                userInfo: [NSLocalizedDescriptionKey: "插件事务快照不属于当前操作，已拒绝使用"]
+            )
+        }
+    }
+
+    private static func createPluginOperationSnapshotSynchronously(
+        operationID: String,
+        profile: DshAppProfile,
+        profileDirectory: URL
+    ) throws -> DshPluginOperationSnapshotReference {
+        guard profile == .desktop else {
+            throw DshPluginOperationError.desktopProfileRequired
+        }
+        guard UUID(uuidString: operationID) != nil else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -45,
+                userInfo: [NSLocalizedDescriptionKey: "插件事务 ID 无效"]
+            )
+        }
+
+        let fileManager = FileManager.default
+        let profileURL = profileDirectory.standardizedFileURL
+        let snapshotID = UUID().uuidString
+        let snapshotURL = try pluginOperationSnapshotURL(
+            operationID: operationID,
+            snapshotID: snapshotID
+        )
+        let profileExists = fileManager.fileExists(atPath: profileURL.path)
+        let baselineDigest = try pluginProfileDigestSynchronously(at: profileURL)
+        try fileManager.createDirectory(at: snapshotURL, withIntermediateDirectories: true)
+        do {
+            if profileExists {
+                try copyDirectoryPreferClone(
+                    from: profileURL,
+                    to: snapshotURL.appendingPathComponent("profile", isDirectory: true)
+                )
+            } else {
+                try Data().write(
+                    to: snapshotURL.appendingPathComponent(missingProfileMarkerName),
+                    options: .atomic
+                )
+            }
+
+            // A concurrently modified Profile must never be captured as a
+            // purportedly coherent rollback point.
+            guard try pluginProfileDigestSynchronously(at: profileURL) == baselineDigest else {
+                throw DshPluginOperationError.staleProfileChanged
+            }
+            let reference = DshPluginOperationSnapshotReference(
+                snapshotID: snapshotID,
+                operationID: operationID,
+                profile: profile,
+                profileDirectory: profileURL,
+                baselineDigest: baselineDigest,
+                profileWasMissing: !profileExists
+            )
+            try writePluginSnapshotMetadata(reference, at: snapshotURL)
+            return reference
+        } catch {
+            try? fileManager.removeItem(at: snapshotURL)
+            throw error
+        }
+    }
+
+    /// Create an app-owned snapshot for one P01 operation.  The operation ID,
+    /// Profile and absolute path are persisted beside the copy and verified on
+    /// every later restore/delete request.
+    public func createPluginOperationSnapshot(
+        operationID: String,
+        profile: DshAppProfile = .desktop,
+        profileDirectory: URL
+    ) async throws -> DshPluginOperationSnapshotReference {
+        try await Task.detached(priority: .utility) {
+            try Self.createPluginOperationSnapshotSynchronously(
+                operationID: operationID,
+                profile: profile,
+                profileDirectory: profileDirectory
+            )
+        }.value
+    }
+
+    private static func restorePluginOperationSnapshotSynchronously(
+        _ reference: DshPluginOperationSnapshotReference,
+        expectedCurrentDigest: String?
+    ) throws {
+        guard reference.ownerID == DshPluginOperationSnapshotReference.owner,
+              reference.profile == .desktop else {
+            throw DshPluginOperationError.desktopProfileRequired
+        }
+        let snapshotURL = try pluginOperationSnapshotURL(
+            operationID: reference.operationID,
+            snapshotID: reference.snapshotID
+        )
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: snapshotURL.path) else {
+            throw NSError(
+                domain: "DshPluginManager",
+                code: -46,
+                userInfo: [NSLocalizedDescriptionKey: "找不到插件事务快照"]
+            )
+        }
+        try requireOwnedPluginSnapshot(reference, at: snapshotURL)
+
+        let profileURL = URL(fileURLWithPath: reference.profileDirectory, isDirectory: true)
+            .standardizedFileURL
+        let currentDigest = try pluginProfileDigestSynchronously(at: profileURL)
+        if let expectedCurrentDigest, currentDigest != expectedCurrentDigest {
+            throw DshPluginOperationError.externalModification
+        }
+
+        let savedProfileURL = snapshotURL.appendingPathComponent("profile", isDirectory: true)
+        let missingMarkerURL = snapshotURL.appendingPathComponent(missingProfileMarkerName)
+        let displacedURL = profileURL.deletingLastPathComponent()
+            .appendingPathComponent(".dsh-plugin-restore-\(UUID().uuidString)", isDirectory: true)
+        var displacedCurrent = false
+        do {
+            if fileManager.fileExists(atPath: profileURL.path) {
+                try fileManager.moveItem(at: profileURL, to: displacedURL)
+                displacedCurrent = true
+            }
+            if !fileManager.fileExists(atPath: missingMarkerURL.path) {
+                guard fileManager.fileExists(atPath: savedProfileURL.path) else {
+                    throw NSError(
+                        domain: "DshPluginManager",
+                        code: -47,
+                        userInfo: [NSLocalizedDescriptionKey: "插件事务快照内容不完整"]
+                    )
+                }
+                try fileManager.createDirectory(
+                    at: profileURL.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try copyDirectoryPreferClone(from: savedProfileURL, to: profileURL)
+            }
+            guard try pluginProfileDigestSynchronously(at: profileURL) == reference.baselineDigest else {
+                throw NSError(
+                    domain: "DshPluginManager",
+                    code: -48,
+                    userInfo: [NSLocalizedDescriptionKey: "插件事务快照恢复后校验失败"]
+                )
+            }
+            if displacedCurrent {
+                try fileManager.removeItem(at: displacedURL)
+            }
+        } catch {
+            try? fileManager.removeItem(at: profileURL)
+            if displacedCurrent {
+                try? fileManager.moveItem(at: displacedURL, to: profileURL)
+            }
+            throw error
+        }
+    }
+
+    /// Restore only when the current tree still matches the last digest
+    /// observed by this operation.  A changed tree is an external conflict,
+    /// not permission to overwrite newer user changes.
+    public func restorePluginOperationSnapshot(
+        _ reference: DshPluginOperationSnapshotReference,
+        expectedCurrentDigest: String? = nil
+    ) async throws {
+        try await Task.detached(priority: .utility) {
+            try Self.restorePluginOperationSnapshotSynchronously(
+                reference,
+                expectedCurrentDigest: expectedCurrentDigest
+            )
+        }.value
+    }
+
+    /// Delete exactly one owned snapshot.  Callers must clear the persisted
+    /// operation record only after this succeeds (or intentionally retain it
+    /// for a retry).
+    public func deletePluginOperationSnapshot(
+        _ reference: DshPluginOperationSnapshotReference
+    ) async throws {
+        try await Task.detached(priority: .utility) {
+            // Validate the caller-provided owner before resolving any path.
+            // Metadata validation below is still required: a path can be
+            // replaced between operations, and deletion must remain
+            // fail-closed when the on-disk owner proof does not match.
+            guard reference.ownerID == DshPluginOperationSnapshotReference.owner,
+                  reference.profile == .desktop else {
+                throw DshPluginOperationError.desktopProfileRequired
+            }
+            let snapshotURL = try Self.pluginOperationSnapshotURL(
+                operationID: reference.operationID,
+                snapshotID: reference.snapshotID
+            )
+            guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return }
+            try Self.requireOwnedPluginSnapshot(reference, at: snapshotURL)
+            try FileManager.default.removeItem(at: snapshotURL)
+            let operationURL = snapshotURL.deletingLastPathComponent()
+            if (try? FileManager.default.contentsOfDirectory(atPath: operationURL.path))?.isEmpty == true {
+                try? FileManager.default.removeItem(at: operationURL)
+            }
+        }.value
+    }
+
+    /// Probe one exact operation snapshot. A present directory is considered
+    /// usable only after its on-disk ownership metadata matches the supplied
+    /// operation reference; a missing directory is an idempotent-cleanup
+    /// result, not an implicit authorization to inspect or delete anything
+    /// else.
+    public func hasOwnedPluginOperationSnapshot(
+        _ reference: DshPluginOperationSnapshotReference
+    ) async throws -> Bool {
+        try await Task.detached(priority: .utility) {
+            guard reference.ownerID == DshPluginOperationSnapshotReference.owner,
+                  reference.profile == .desktop else {
+                throw DshPluginOperationError.desktopProfileRequired
+            }
+            let snapshotURL = try Self.pluginOperationSnapshotURL(
+                operationID: reference.operationID,
+                snapshotID: reference.snapshotID
+            )
+            guard FileManager.default.fileExists(atPath: snapshotURL.path) else {
+                return false
+            }
+            try Self.requireOwnedPluginSnapshot(reference, at: snapshotURL)
+            return true
+        }.value
     }
 
     private static func createWebProfileSnapshotSynchronously(
@@ -698,6 +1102,35 @@ public final class DshPluginManager {
         return outdated
     }
 
+    /// `pnpm update --latest` can exit successfully while the configured
+    /// minimum-release-age policy keeps a newly published dependency at its
+    /// current version. Treat that as an incomplete update instead of
+    /// reporting a committed success to the settings UI.
+    private func verifyPluginsReachedLatest(
+        _ packageNames: [String],
+        profileDirectory: URL,
+        profile: DshAppProfile,
+        registry: String,
+        ignoringMinimumReleaseAge: Bool
+    ) async throws {
+        let outdated = try await checkOutdatedPlugins(
+            at: profileDirectory,
+            profile: profile,
+            registry: registry
+        )
+        let remaining = packageNames.filter { outdated[$0] != nil }.sorted()
+        guard !remaining.isEmpty else { return }
+        let packages = remaining.joined(separator: "、")
+        let detail = ignoringMinimumReleaseAge
+            ? "更新命令已完成，但以下插件仍未达到 Registry 最新版本：\(packages)"
+            : "MINIMUM_RELEASE_AGE_VIOLATION：以下插件受发布时间策略限制，尚未更新到 Registry 最新版本：\(packages)"
+        throw NSError(
+            domain: "DshPluginManager",
+            code: -11,
+            userInfo: [NSLocalizedDescriptionKey: detail]
+        )
+    }
+
     /// Add a plugin by name or npm specifier.
     public func addPlugin(
         spec: String,
@@ -773,6 +1206,248 @@ public final class DshPluginManager {
         return messages.contains { $0.contains("MINIMUM_RELEASE_AGE_VIOLATION") }
     }
 
+    /// Resolve an update in a disposable Profile before the P01 mutation
+    /// boundary is entered.  This intentionally does not use the real
+    /// Profile's `node_modules`, lockfile or package manifest: pnpm receives
+    /// only the small set of Profile inputs needed to resolve the graph and
+    /// is forced into lockfile-only/no-scripts mode.  A registry or resolver
+    /// failure is advisory (`.inconclusive`) and falls through to the normal
+    /// transaction, while a release-age rejection can be confirmed by the UI
+    /// immediately without stopping the service first.
+    public func preflightPluginUpdate(
+        name: String,
+        profileDirectory: URL,
+        profile: DshAppProfile,
+        registry: String
+    ) async throws -> DshPluginUpdatePreflightResult {
+        guard !Self.internalPluginDependencyNames.contains(name) else {
+            return .inconclusive
+        }
+        return try await preflightPluginUpdates(
+            [name],
+            profileDirectory: profileDirectory,
+            profile: profile,
+            registry: registry
+        )
+    }
+
+    /// Read-only resolver for a batch update.  The package list is derived
+    /// from the isolated copy, not from mutable UI state, so direct callers
+    /// and the settings UI use the same dependency set as the eventual P01
+    /// mutation.
+    public func preflightAllPluginUpdates(
+        profileDirectory: URL,
+        profile: DshAppProfile,
+        registry: String
+    ) async throws -> DshPluginUpdatePreflightResult {
+        let packageNames = listPlugins(at: profileDirectory)
+            .filter { !$0.isManaged && !$0.isLocal }
+            .map(\.name)
+        guard !packageNames.isEmpty else { return .clear }
+        return try await preflightPluginUpdates(
+            packageNames,
+            profileDirectory: profileDirectory,
+            profile: profile,
+            registry: registry
+        )
+    }
+
+    private func preflightPluginUpdates(
+        _ packageNames: [String],
+        profileDirectory: URL,
+        profile: DshAppProfile,
+        registry: String
+    ) async throws -> DshPluginUpdatePreflightResult {
+        try Task.checkCancellation()
+        let capturedRegistry = DshVersionManager.normalizedRegistry(registry)
+        guard let pnpm = NodeRuntime.shared.resolvePnpmBinary(),
+              let node = NodeRuntime.shared.resolveNodeBinary() else {
+            return .inconclusive
+        }
+        guard FileManager.default.fileExists(
+            atPath: profileDirectory.appendingPathComponent("package.json").path
+        ) else {
+            return .inconclusive
+        }
+
+        let fileManager = FileManager.default
+        let preflightDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent(
+                "dsh-plugin-update-preflight-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try fileManager.createDirectory(
+            at: preflightDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? fileManager.removeItem(at: preflightDirectory) }
+
+        // Keep this allow-list narrow. Copying node_modules, .npmrc files or
+        // pnpmfile hooks would make the supposedly read-only check capable of
+        // following user-controlled configuration/code. Private-registry
+        // authentication that is not available to this isolated resolver is
+        // handled as an inconclusive preflight and falls back to P01.
+        let inputFiles = [
+            "package.json",
+            "pnpm-lock.yaml",
+            Self.profileWorkspaceFileName
+        ]
+        for fileName in inputFiles {
+            let source = profileDirectory.appendingPathComponent(fileName)
+            let destination = preflightDirectory.appendingPathComponent(fileName)
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            // Never copy a Profile symlink into the disposable tree: pnpm
+            // could otherwise follow it and write a lockfile or manifest
+            // outside the preflight directory.
+            guard (try? fileManager.destinationOfSymbolicLink(atPath: source.path)) == nil else {
+                return .inconclusive
+            }
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: source.path, isDirectory: &isDirectory),
+                  !isDirectory.boolValue else { return .inconclusive }
+            guard let data = try? Data(contentsOf: source) else {
+                return .inconclusive
+            }
+            try data.write(to: destination, options: .atomic)
+        }
+
+        // These are the same DSH-owned invariants applied by the formal
+        // update methods, but only to the disposable copy.
+        try ensureManagedProfileWorkspaceConfiguration(
+            at: preflightDirectory,
+            profile: profile
+        )
+        if let hostBundle = NodeRuntime.shared.resolveDesktopHostBundlePath() {
+            _ = repairDesktopHostDependency(
+                hostBundle,
+                profileDirectory: preflightDirectory
+            )
+        }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: pnpm)
+        proc.currentDirectoryURL = preflightDirectory
+        proc.arguments = [
+            "update"
+        ] + packageNames + [
+            "--latest",
+            "--lockfile-only",
+            "--ignore-scripts"
+        ] + registryArguments(capturedRegistry) + ["--reporter=append-only"]
+
+        var env = NodeRuntime.shared.buildEnvironment()
+        env["DSH_NODE_BIN"] = node
+        env["npm_config_registry"] = capturedRegistry
+        // Never inherit a user/global config for the resolver. A private
+        // registry without inline credentials will safely return an
+        // inconclusive result and use the normal P01 path instead.
+        let isolatedUserConfig = preflightDirectory.appendingPathComponent(
+            ".dsh-preflight-user.npmrc"
+        )
+        let isolatedGlobalConfig = preflightDirectory.appendingPathComponent(
+            ".dsh-preflight-global.npmrc"
+        )
+        try Data().write(to: isolatedUserConfig, options: .atomic)
+        try Data().write(to: isolatedGlobalConfig, options: .atomic)
+        env["npm_config_userconfig"] = isolatedUserConfig.path
+        env["NPM_CONFIG_USERCONFIG"] = nil
+        env["npm_config_globalconfig"] = isolatedGlobalConfig.path
+        env["NPM_CONFIG_GLOBALCONFIG"] = nil
+        env["npm_config_ignore_scripts"] = "true"
+        let isolatedStore = preflightDirectory.appendingPathComponent("store", isDirectory: true)
+        let isolatedCache = preflightDirectory.appendingPathComponent("cache", isDirectory: true)
+        let isolatedState = preflightDirectory.appendingPathComponent("state", isDirectory: true)
+        let isolatedHome = preflightDirectory.appendingPathComponent("pnpm-home", isDirectory: true)
+        let isolatedXDGCache = preflightDirectory.appendingPathComponent("xdg-cache", isDirectory: true)
+        let isolatedXDGData = preflightDirectory.appendingPathComponent("xdg-data", isDirectory: true)
+        let isolatedXDGConfig = preflightDirectory.appendingPathComponent("xdg-config", isDirectory: true)
+        env["pnpm_config_store_dir"] = isolatedStore.path
+        env["npm_config_store_dir"] = isolatedStore.path
+        env["pnpm_config_cache_dir"] = isolatedCache.path
+        env["npm_config_cache"] = isolatedCache.path
+        env["pnpm_config_state_dir"] = isolatedState.path
+        env["PNPM_HOME"] = isolatedHome.path
+        env["XDG_CACHE_HOME"] = isolatedXDGCache.path
+        env["XDG_DATA_HOME"] = isolatedXDGData.path
+        env["XDG_CONFIG_HOME"] = isolatedXDGConfig.path
+        proc.environment = env
+
+        // A successful lockfile-only update normally leaves a concrete
+        // package.json/lockfile diff in the disposable tree. We use that
+        // diff to distinguish a real resolver success from pnpm's valid
+        // status-0 no-op when minimum-release-age suppresses the candidate.
+        let baselinePackageData = try? Data(
+            contentsOf: preflightDirectory.appendingPathComponent("package.json")
+        )
+        let baselineLockData = try? Data(
+            contentsOf: preflightDirectory.appendingPathComponent("pnpm-lock.yaml")
+        )
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+        let result: DshProcessExecutionResult
+        do {
+            result = try await runProcess(proc, stdout: stdout, stderr: stderr)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return .inconclusive
+        }
+        try Task.checkCancellation()
+
+        let outputText = [
+            String(decoding: result.stdout, as: UTF8.self),
+            String(decoding: result.stderr, as: UTF8.self)
+        ].joined(separator: "\n")
+        if Self.preflightOutputIndicatesMinimumReleaseAge(outputText) {
+            return .minimumReleaseAgeViolation
+        }
+        // A successful resolver run is enough to let the formal transaction
+        // proceed. It may still discover a later health or version issue;
+        // those checks remain owned by P01 and `verifyPluginsReachedLatest`.
+        if result.status == 0 {
+            let packageChanged = (try? Data(
+                contentsOf: preflightDirectory.appendingPathComponent("package.json")
+            )) != baselinePackageData
+            let lockChanged = (try? Data(
+                contentsOf: preflightDirectory.appendingPathComponent("pnpm-lock.yaml")
+            )) != baselineLockData
+            if packageChanged || lockChanged {
+                return .clear
+            }
+
+            // No resolver artifact and no diagnostic is the pnpm status-0
+            // silent-no-op shape. A read-only outdated check against the real
+            // installed manifests tells us whether this update was expected;
+            // if the check itself is unavailable, remain conservative and
+            // let the normal transaction decide.
+            do {
+                let outdated = try await checkOutdatedPlugins(
+                    at: profileDirectory,
+                    profile: profile,
+                    registry: capturedRegistry
+                )
+                if packageNames.contains(where: { outdated[$0] != nil }) {
+                    return .minimumReleaseAgeViolation
+                }
+            } catch {
+                return .inconclusive
+            }
+            return .clear
+        }
+
+        return .inconclusive
+    }
+
+    private static func preflightOutputIndicatesMinimumReleaseAge(_ output: String) -> Bool {
+        let normalized = output.lowercased()
+        return normalized.contains("minimum_release_age_violation")
+            || normalized.contains("minimum-release-age")
+            || normalized.contains("minimum release age")
+    }
+
     /// Update a specific plugin to its latest version.
     ///
     /// The normal path keeps pnpm's supply-chain release-age policy. The UI
@@ -832,6 +1507,13 @@ public final class DshPluginManager {
             let detail = processOutput(result)
             throw NSError(domain: "DshPluginManager", code: -3, userInfo: [NSLocalizedDescriptionKey: "更新插件 \(name) 失败（退出码 \(result.status)）\(detail)"])
         }
+        try await verifyPluginsReachedLatest(
+            [name],
+            profileDirectory: profileDir,
+            profile: targetProfile,
+            registry: capturedRegistry,
+            ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+        )
     }
 
     /// Update all installed plugins to their latest versions.
@@ -883,6 +1565,13 @@ public final class DshPluginManager {
             let detail = processOutput(result)
             throw NSError(domain: "DshPluginManager", code: -4, userInfo: [NSLocalizedDescriptionKey: "批量更新插件失败（退出码 \(result.status)）\(detail)"])
         }
+        try await verifyPluginsReachedLatest(
+            pluginNames,
+            profileDirectory: profileDir,
+            profile: targetProfile,
+            registry: capturedRegistry,
+            ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
+        )
     }
 
     /// Remove a plugin by name.
@@ -1917,7 +2606,6 @@ public final class DshPluginManager {
         sourceBundle: String
     ) throws -> Bool {
         let operation = "安装桌面桥接依赖"
-        let sourceURL = URL(fileURLWithPath: sourceBundle, isDirectory: true)
         let installedHostURL = profileDir
             .appendingPathComponent("node_modules", isDirectory: true)
             .appendingPathComponent(Self.desktopHostPluginName, isDirectory: true)

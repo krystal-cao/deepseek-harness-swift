@@ -44,6 +44,11 @@ public final class DshAccessController: @unchecked Sendable {
 
     private let lock = NSLock()
     private var nextPolicyRevision = 0
+    /// The immutable launch generation carries the policy used for bootstrap,
+    /// while these fields track the policy that the live Node process has
+    /// acknowledged. Do not advance them when a policy is merely written:
+    /// callers must commit only after the matching ACK arrives.
+    private var lastCommittedPolicyRevision = 0
     private var didSendGeneration = false
     private var didCloseWriteHandle = false
     private var currentOrdinaryBrowserEnabled: Bool
@@ -131,9 +136,28 @@ public final class DshAccessController: @unchecked Sendable {
         let data = try DshControlProtocol.encodePolicy(message)
         try controlWriteHandle.write(contentsOf: data)
         nextPolicyRevision = revision
+        return revision
+    }
+
+    /// Commit a policy only after DshProcessIO has validated the matching
+    /// generation/revision ACK. A late ACK from an older revision must never
+    /// roll the live policy back underneath a newer acknowledged revision.
+    public func commitPolicy(
+        revision: Int,
+        ordinaryBrowserEnabled: Bool,
+        networkExposure: DshNetworkExposure
+    ) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard revision >= lastCommittedPolicyRevision,
+              revision <= nextPolicyRevision,
+              DshControlProtocol.validateNetworkExposure(networkExposure),
+              networkExposure == .loopback || ordinaryBrowserEnabled else {
+            return
+        }
+        lastCommittedPolicyRevision = revision
         currentOrdinaryBrowserEnabled = ordinaryBrowserEnabled
         currentNetworkExposure = networkExposure
-        return revision
     }
 
     public func closeWriteHandle() {

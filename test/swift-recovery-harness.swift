@@ -57,6 +57,7 @@ struct RecoveryHarness {
         var firstRetryRequest: DshRecoveryActionRequest?
         var secondRetryRequest: DshRecoveryActionRequest?
         var safeModeRequest: DshRecoveryActionRequest?
+        var removalRequest: DshRecoveryPluginRemovalRequest?
         let actions = DshRecoveryActions(
             retry: { request in
                 retryCount += 1
@@ -70,13 +71,17 @@ struct RecoveryHarness {
             startSafeMode: { request in
                 safeModeCount += 1
                 safeModeRequest = request
+            },
+            removePluginAndRetry: { request in
+                removalRequest = request
             }
         )
         let viewModel = DshRecoveryViewModel(
             launchID: launchID,
             snapshot: snapshot,
             actions: actions,
-            redactor: DshSecretRedactor(secrets: [token])
+            redactor: DshSecretRedactor(secrets: [token]),
+            originalProfilePath: "/tmp/dsh/profiles/desktop"
         )
 
         requireRecovery(viewModel.phase == .startingService, "matching snapshot should expose its phase")
@@ -157,6 +162,74 @@ struct RecoveryHarness {
         requireRecovery(!viewModel.finishAction(firstRetryRequest!), "a previous request token must not finish a new request")
         requireRecovery(viewModel.finishAction(secondRetryRequest!, message: "重试仍未完成"), "second retry should be finishable")
         requireRecovery(viewModel.actionMessage == "重试仍未完成", "completion message should be exposed")
+
+        let locatedSnapshot = DshDiagnosticSnapshot(
+            context: snapshot.context,
+            phase: .dependencyCheck,
+            records: [DshDiagnosticRecord(
+                launchID: launchID,
+                generationID: generationID,
+                timestamp: timestamp.addingTimeInterval(2),
+                phase: .dependencyCheck,
+                code: .pluginConfigurationInvalid,
+                summary: "插件配置失败",
+                retryability: .retryable,
+                source: .pluginInspector,
+                evidence: [DshDiagnosticEvidence(
+                    source: .pluginInspector,
+                    confidence: .confirmed,
+                    summary: "唯一根插件配置无效",
+                    pluginName: "fixture-plugin",
+                    generationID: generationID
+                )]
+            )],
+            log: "",
+            generatedAt: timestamp.addingTimeInterval(2)
+        )
+        requireRecovery(viewModel.apply(locatedSnapshot, for: launchID), "newer plugin snapshot should be accepted")
+        viewModel.setPluginInspection(DshPluginInspectionResult(
+            profileDirectory: "/tmp/dsh/profiles/desktop",
+            runtimeHostRoot: "/tmp/dsh/runtime",
+            runtimeRootVerified: true,
+            items: [DshPluginInspectionItem(
+                name: "fixture-plugin",
+                kind: .library,
+                source: .profile,
+                status: .healthy,
+                confidence: .confirmed
+            )],
+            bundleOrder: [],
+            disabledBundleNames: [],
+            issues: [],
+            uncertainties: [],
+            scannedFileCount: 1,
+            isComplete: true
+        ))
+        requireRecovery(viewModel.pluginFailureAnalysis?.locatedCandidates.count == 1,
+                        "unique structured plugin evidence should be located")
+        requireRecovery(viewModel.canRequestPluginRemoval,
+                        "exact installed desktop root should expose removal intent")
+        requireRecovery(viewModel.requestRemovePluginAndRetry(),
+                        "removal intent should dispatch once")
+        requireRecovery(removalRequest?.pluginName == "fixture-plugin",
+                        "removal intent should carry the resolved root")
+        requireRecovery(removalRequest?.isExecutable == true,
+                        "only a fully validated intent is executable")
+        requireRecovery(viewModel.isFreshPluginRemovalRequest(removalRequest!),
+                        "fresh removal intent should retain token and generation identity")
+        let stalePathRequest = DshRecoveryPluginRemovalRequest(
+            id: removalRequest!.id,
+            launchID: removalRequest!.launchID,
+            planToken: removalRequest!.planToken,
+            pluginName: removalRequest!.pluginName,
+            generationID: removalRequest!.generationID,
+            originalProfile: removalRequest!.originalProfile,
+            originalProfilePath: "/tmp/dsh/profiles/web"
+        )
+        requireRecovery(!viewModel.isFreshPluginRemovalRequest(stalePathRequest),
+                        "a web Profile path must invalidate the removal intent")
+        requireRecovery(viewModel.finishPluginRemoval(removalRequest!),
+                        "coordinator should be able to settle removal intent")
 
         viewModel.setSafeModeAvailability(true)
         requireRecovery(viewModel.requestSafeMode(), "available safe mode should be accepted")

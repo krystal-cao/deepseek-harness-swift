@@ -16,6 +16,25 @@ public protocol DshBridgeDelegate: AnyObject {
 public final class DshBridgeHandler: NSObject, WKScriptMessageHandler {
     public weak var delegate: DshBridgeDelegate?
 
+    private let contextLock = NSLock()
+    private var validationContext: DshBridgeValidationContext?
+    private let validator = DshBridgeMessageValidator()
+
+    /// Bind one WebKit view to one launch and process generation. A nil
+    /// context disables every bridge action until the next authenticated
+    /// service session is ready.
+    public func updateValidationContext(_ context: DshBridgeValidationContext?) {
+        contextLock.lock()
+        validationContext = context
+        contextLock.unlock()
+    }
+
+    private func currentValidationContext() -> DshBridgeValidationContext? {
+        contextLock.lock()
+        defer { contextLock.unlock() }
+        return validationContext
+    }
+
     public static let scriptSource = """
     (function() {
         if (window.dshDesktop) return;
@@ -43,13 +62,33 @@ public final class DshBridgeHandler: NSObject, WKScriptMessageHandler {
     """
 
     public func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "dshDesktop",
-              let body = message.body as? [String: Any],
-              let type = body["type"] as? String else {
+        // Take a single context snapshot. The context contains the exact
+        // WebView identity, launch/generation IDs, origin and capabilities;
+        // none of these may be supplied by page JavaScript.
+        guard let context = currentValidationContext() else { return }
+        let body = trustedBody(message.body, context: context)
+        let origin = DshBridgeOrigin(
+            scheme: message.frameInfo.securityOrigin.protocol,
+            host: message.frameInfo.securityOrigin.host,
+            port: message.frameInfo.securityOrigin.port
+        )
+        let incoming = DshBridgeIncomingMessage(
+            handlerName: message.name,
+            isMainFrame: message.frameInfo.isMainFrame,
+            webViewIdentity: message.webView.map { DshBridgeWebViewIdentity(object: $0) },
+            origin: origin,
+            body: body
+        )
+        guard case .success(let validated) = validator.validate(incoming, context: context) else {
+            // Do not echo untrusted bodies or payloads into logs. Rejection is
+            // intentionally silent at the WebKit boundary.
             return
         }
 
-        switch type {
+        let type = validated.type
+        let payload = validated.payload as? [String: Any]
+
+        switch type.rawValue {
         case "ready":
             delegate?.bridgeDidReceiveReady()
 
@@ -59,18 +98,15 @@ public final class DshBridgeHandler: NSObject, WKScriptMessageHandler {
             }
 
         case "theme":
-            let payload = body["payload"] as? [String: Any]
             let colorScheme = payload?["colorScheme"] as? String
             let externalTheme = payload?["externalTheme"] as? String
             delegate?.bridgeDidReceiveTheme(colorScheme: colorScheme, externalTheme: externalTheme)
 
         case "locale":
-            let payload = body["payload"] as? [String: Any]
             let lang = payload?["language"] as? String ?? "zh"
             delegate?.bridgeDidReceiveLocale(language: lang)
 
         case "notify":
-            let payload = body["payload"] as? [String: Any]
             let title = payload?["title"] as? String
             let cwd = payload?["cwd"] as? String
             if !MainWindowController.shared.isFocusedForNotifications {
@@ -78,32 +114,42 @@ public final class DshBridgeHandler: NSObject, WKScriptMessageHandler {
             }
 
         case "windowDragPrepare":
-            guard message.frameInfo.isMainFrame else { return }
             delegate?.bridgeDidPrepareWindowDrag()
 
         case "windowDragStart":
-            guard message.frameInfo.isMainFrame else { return }
             delegate?.bridgeDidStartWindowDrag()
 
         case "windowDragMove":
-            guard message.frameInfo.isMainFrame else { return }
             delegate?.bridgeDidMoveWindowDrag()
 
         case "windowDragEnd":
-            guard message.frameInfo.isMainFrame else { return }
             delegate?.bridgeDidEndWindowDrag()
 
         case "windowTitlebarDoubleClick":
-            guard message.frameInfo.isMainFrame else { return }
             delegate?.bridgeDidDoubleClickWindowTitlebar()
 
         case "debug":
-            if let msg = body["payload"] {
+            if let msg = validated.payload as? String {
                 print("[DshBridge:debug]", msg)
             }
 
         default:
             break
         }
+    }
+
+    /// Page JavaScript intentionally sends only an action request. Identity
+    /// fields are attached here from the captured native context, while any
+    /// page-supplied identity is left intact so the validator rejects it when
+    /// it does not match the active launch.
+    private func trustedBody(_ body: Any, context: DshBridgeValidationContext) -> Any {
+        guard var dictionary = body as? [String: Any] else { return body }
+        if dictionary["launchID"] == nil {
+            dictionary["launchID"] = context.launchID.uuidString
+        }
+        if dictionary["generationID"] == nil {
+            dictionary["generationID"] = context.generationID.uuidString
+        }
+        return dictionary
     }
 }

@@ -43,18 +43,12 @@ public struct PluginsTabView: View {
                 .padding(.vertical, 8)
             }
 
-            if viewModel.isOperatingPlugin {
-                HStack(spacing: 9) {
-                    ProgressView().controlSize(.small)
-                    Text(viewModel.operatingPluginName ?? "")
-                        .font(.system(size: 11.5, weight: .medium))
-                    Spacer()
-                }
-                .padding(11)
-                .background(Color.accentColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            if viewModel.pluginOperationPhase != nil {
+                pluginOperationPanel
             }
 
-            if let pluginStatusMessage = viewModel.pluginStatusMessage {
+            if let pluginStatusMessage = viewModel.pluginStatusMessage,
+               viewModel.pluginOperationOutcome == nil {
                 HStack(spacing: 9) {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundStyle(.green)
@@ -73,7 +67,7 @@ public struct PluginsTabView: View {
             SettingsSection("已安装插件", footer: "内置桥接插件由 DSH Desktop 维护，不能卸载。") {
                 VStack(spacing: 0) {
                     HStack {
-                        Text("\(viewModel.installedPlugins.count) 个插件")
+                        Text("\(viewModel.filteredInstalledPlugins.count)/\(viewModel.installedPlugins.count) 个插件")
                         .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -97,7 +91,7 @@ public struct PluginsTabView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .disabled(viewModel.isCheckingPluginUpdates || viewModel.isOperatingPlugin)
+                        .disabled(viewModel.isCheckingPluginUpdates)
                         .help("检查已安装插件是否有新版本")
                         Button {
                             Task { await viewModel.inspectPlugins() }
@@ -112,11 +106,25 @@ public struct PluginsTabView: View {
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                        .disabled(viewModel.isInspectingPlugins || viewModel.isOperatingPlugin)
+                        .disabled(viewModel.isInspectingPlugins)
                         .help("只读检查当前 Profile 的包、Bundle 和 patch 引用")
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 11)
+
+                    HStack(spacing: 9) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                        TextField("搜索插件名称、版本或描述", text: $viewModel.pluginSearchText)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 11))
+                        Toggle("仅异常", isOn: $viewModel.pluginExceptionsOnly)
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 10.5))
+                            .help("只显示最近一次只读检查标记为异常的插件")
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
 
                     SettingsDivider()
 
@@ -128,10 +136,17 @@ public struct PluginsTabView: View {
                             Spacer()
                         }
                         .padding(14)
+                    } else if viewModel.filteredInstalledPlugins.isEmpty {
+                        HStack(spacing: 9) {
+                            Text(viewModel.pluginExceptionsOnly ? "没有检测到异常插件" : "没有匹配的插件")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                        .padding(14)
                     } else {
-                        ForEach(Array(viewModel.installedPlugins.enumerated()), id: \.element.id) { index, plugin in
-                            pluginRow(for: plugin)
-                            if index < viewModel.installedPlugins.count - 1 { SettingsDivider() }
+                        ForEach(DshPluginListCategory.allCases) { category in
+                            pluginCategorySection(category)
                         }
                     }
                 }
@@ -144,6 +159,91 @@ public struct PluginsTabView: View {
             if viewModel.pluginInspectionResult == nil {
                 await viewModel.inspectPlugins()
             }
+        }
+    }
+
+    @ViewBuilder
+    private func pluginCategorySection(_ category: DshPluginListCategory) -> some View {
+        let plugins = viewModel.plugins(in: category)
+        if !plugins.isEmpty {
+            HStack {
+                Text(category.rawValue)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(category == .exception ? .orange : .secondary)
+                Text("\(plugins.count)")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Color.primary.opacity(0.035))
+
+            ForEach(Array(plugins.enumerated()), id: \.element.id) { index, plugin in
+                pluginRow(for: plugin)
+                if index < plugins.count - 1 { SettingsDivider() }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pluginOperationPanel: some View {
+        if let phase = viewModel.pluginOperationPhase {
+            let outcome = viewModel.pluginOperationOutcome
+            let tint: Color = {
+                if let outcome {
+                    switch outcome {
+                    case .succeeded: return .green
+                    case .restored: return .orange
+                    case .recoveryRequired, .externalModification: return .red
+                    }
+                }
+                return phase == .recoveryRequired ? .red : .accentColor
+            }()
+
+            HStack(alignment: .top, spacing: 9) {
+                if viewModel.isOperatingPlugin {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: outcome?.systemImage ?? phase.systemImage)
+                        .foregroundStyle(tint)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(phase.title)
+                        .font(.system(size: 11.5, weight: .medium))
+                    if viewModel.isOperatingPlugin,
+                       let operationName = viewModel.operatingPluginName,
+                       !operationName.isEmpty {
+                        Text(operationName)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                    }
+                    if let outcome {
+                        Text(outcome.title)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(tint)
+                    }
+                    if let detail = viewModel.pluginOperationDetail,
+                       !detail.isEmpty {
+                        Text(detail)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(3)
+                    }
+                    if viewModel.canRetryPluginOperation {
+                        Button("安全重试") {
+                            viewModel.retryLastPluginOperation()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(viewModel.isOperatingPlugin || !viewModel.pluginMutationsAllowed)
+                        .help("仅在原状态已恢复且没有待处理事务时重新执行；仍遵守本次 minimum-release-age 确认")
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(11)
+            .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
     }
 

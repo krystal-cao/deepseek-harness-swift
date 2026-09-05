@@ -50,19 +50,64 @@ public struct DshRecoveryActionCompletionToken: Equatable, Sendable {
     }
 }
 
+/// A recovery removal request carries every identity the coordinator must
+/// re-check before it can leave the read-only recovery surface.  The plan
+/// token alone is intentionally insufficient: launch, generation and Profile
+/// identity are all part of the request.
+public struct DshRecoveryPluginRemovalRequest: Identifiable, Equatable, Sendable {
+    public let id: UUID
+    public let launchID: UUID
+    public let planToken: UUID
+    public let pluginName: String
+    public let generationID: UUID
+    public let originalProfile: String
+    public let originalProfilePath: String
+
+    public init(
+        id: UUID = UUID(),
+        launchID: UUID,
+        planToken: UUID,
+        pluginName: String,
+        generationID: UUID,
+        originalProfile: String,
+        originalProfilePath: String = ""
+    ) {
+        self.id = id
+        self.launchID = launchID
+        self.planToken = planToken
+        self.pluginName = pluginName
+        self.generationID = generationID
+        self.originalProfile = originalProfile
+        self.originalProfilePath = originalProfilePath
+    }
+
+    /// This is an executable intent, not resolver authority.  The MainWindow
+    /// coordinator still revalidates every field before entering P01.
+    public var isExecutable: Bool { true }
+}
+
 public struct DshRecoveryActions {
     public var retry: (DshRecoveryActionRequest) -> Void
     public var openSettings: (DshRecoveryActionRequest) -> Void
     public var startSafeMode: (DshRecoveryActionRequest) -> Void
+    public var removePluginAndRetry: (DshRecoveryPluginRemovalRequest) -> Void
+    public var copyDiagnosticSummary: (String) -> Void
+    public var saveDiagnosticExport: (DshDiagnosticExportPlan) -> Void
 
     public init(
         retry: @escaping (DshRecoveryActionRequest) -> Void = { _ in },
         openSettings: @escaping (DshRecoveryActionRequest) -> Void = { _ in },
-        startSafeMode: @escaping (DshRecoveryActionRequest) -> Void = { _ in }
+        startSafeMode: @escaping (DshRecoveryActionRequest) -> Void = { _ in },
+        removePluginAndRetry: @escaping (DshRecoveryPluginRemovalRequest) -> Void = { _ in },
+        copyDiagnosticSummary: @escaping (String) -> Void = { _ in },
+        saveDiagnosticExport: @escaping (DshDiagnosticExportPlan) -> Void = { _ in }
     ) {
         self.retry = retry
         self.openSettings = openSettings
         self.startSafeMode = startSafeMode
+        self.removePluginAndRetry = removePluginAndRetry
+        self.copyDiagnosticSummary = copyDiagnosticSummary
+        self.saveDiagnosticExport = saveDiagnosticExport
     }
 }
 
@@ -83,12 +128,22 @@ public final class DshRecoveryViewModel: ObservableObject {
     @Published public private(set) var actionInFlight: DshRecoveryAction?
     @Published public private(set) var actionRequest: DshRecoveryActionRequest?
     @Published public private(set) var actionMessage: String?
+    @Published public private(set) var diagnosticPreview: String?
+    @Published public private(set) var diagnosticPreviewByteCount = 0
     @Published public private(set) var isSafeModeAvailable = false
     @Published public private(set) var safeModeAvailabilityDescription = "安全模式尚未接入。"
+    @Published public private(set) var pluginFailureAnalysis: DshPluginFailureAnalysis?
+    @Published public private(set) var pluginRemovalInFlight = false
+    @Published public private(set) var pluginRemovalRequest: DshRecoveryPluginRemovalRequest?
 
     private let actions: DshRecoveryActions
     private let redactor: DshSecretRedactor
     private let maximumDetailBytes: Int
+    private let diagnosticExporter: DshDiagnosticExporter
+    private let diagnosticMetadata: DshDiagnosticExportMetadata
+    private let pluginResolver: DshPluginFailureResolver
+    private var pluginInspection: DshPluginInspectionResult?
+    private let originalProfilePath: String?
     private var latestSnapshotDate: Date?
     private var nextActionSequence: UInt64 = 0
 
@@ -97,16 +152,31 @@ public final class DshRecoveryViewModel: ObservableObject {
         snapshot: DshDiagnosticSnapshot? = nil,
         actions: DshRecoveryActions = DshRecoveryActions(),
         redactor: DshSecretRedactor = DshSecretRedactor(),
-        maximumDetailBytes: Int = 64 * 1024
+        maximumDetailBytes: Int = 64 * 1024,
+        diagnosticExporter: DshDiagnosticExporter = DshDiagnosticExporter(),
+        diagnosticMetadata: DshDiagnosticExportMetadata = DshDiagnosticExportMetadata(),
+        pluginInspection: DshPluginInspectionResult? = nil,
+        pluginResolver: DshPluginFailureResolver = DshPluginFailureResolver(),
+        originalProfilePath: String? = nil
     ) {
         self.launchID = launchID
         self.actions = actions
         self.redactor = redactor
         self.maximumDetailBytes = max(64, maximumDetailBytes)
+        self.diagnosticExporter = diagnosticExporter
+        self.diagnosticMetadata = diagnosticMetadata
+        self.pluginInspection = pluginInspection
+        self.pluginResolver = pluginResolver
+        self.originalProfilePath = originalProfilePath
         self.snapshot = nil
         self.actionInFlight = nil
         self.actionRequest = nil
         self.actionMessage = nil
+        self.diagnosticPreview = nil
+        self.diagnosticPreviewByteCount = 0
+        self.pluginFailureAnalysis = nil
+        self.pluginRemovalInFlight = false
+        self.pluginRemovalRequest = nil
 
         if let snapshot {
             _ = apply(snapshot, for: launchID)
@@ -165,6 +235,89 @@ public final class DshRecoveryViewModel: ObservableObject {
         actionInFlight != nil
     }
 
+    public var hasDiagnosticSnapshot: Bool {
+        snapshot != nil
+    }
+
+    /// A compact, safe-to-share summary. It intentionally excludes process
+    /// output, chat content, credentials and environment variables.
+    public var diagnosticSummary: String {
+        guard let snapshot else { return "DSH 诊断摘要\n暂无可用诊断。" }
+        var lines = ["DSH 诊断摘要"]
+        if let context = snapshot.context {
+            if let runtimeVersion = context.runtimeVersion {
+                lines.append("Runtime：\(runtimeVersion)")
+            }
+            if let profile = context.profile {
+                lines.append("Profile：\(profile)")
+            }
+        }
+        if let phase = snapshot.phase {
+            lines.append("阶段：\(phase.displayName)")
+        }
+        if let record = snapshot.records.last {
+            lines.append("错误码：\(record.code.rawValue)")
+            lines.append("摘要：\(record.summary)")
+        }
+        return boundedRedacted(lines.joined(separator: "\n"))
+    }
+
+    /// Build an in-memory JSON preview. No file or network side effect occurs.
+    /// The current sanitized snapshot remains intact if rendering fails.
+    @discardableResult
+    public func refreshDiagnosticPreview() -> Bool {
+        guard let snapshot else {
+            diagnosticPreview = nil
+            diagnosticPreviewByteCount = 0
+            return false
+        }
+        do {
+            let preview = try diagnosticExporter.preview(
+                snapshot: snapshot,
+                metadata: diagnosticMetadata
+            )
+            diagnosticPreview = preview.json
+            diagnosticPreviewByteCount = preview.byteCount
+            return true
+        } catch {
+            actionMessage = "无法生成诊断预览：\(boundedRedacted(error.localizedDescription))"
+            return false
+        }
+    }
+
+    @discardableResult
+    public func requestCopyDiagnosticSummary() -> Bool {
+        guard snapshot != nil else {
+            actionMessage = "暂无可复制的诊断。"
+            return false
+        }
+        actions.copyDiagnosticSummary(diagnosticSummary)
+        actionMessage = "诊断摘要已复制。"
+        return true
+    }
+
+    /// Create a user-approved export plan and pass it to the native save
+    /// panel. A failed plan never clears the in-memory snapshot or preview.
+    @discardableResult
+    public func requestSaveDiagnosticExport() -> Bool {
+        guard let snapshot else {
+            actionMessage = "暂无可保存的诊断。"
+            return false
+        }
+        do {
+            let plan = try diagnosticExporter.makePlan(
+                snapshot: snapshot,
+                metadata: diagnosticMetadata
+            )
+            actions.saveDiagnosticExport(plan)
+            actionMessage = "请选择诊断 JSON 的保存位置。"
+            return true
+        } catch {
+            actionMessage = "无法准备诊断导出：\(boundedRedacted(error.localizedDescription))"
+            return false
+        }
+    }
+
     /// Apply a snapshot only when both the caller's identity and the
     /// snapshot's context identify this view model's launch. Generated dates
     /// also prevent an older same-launch event from reverting the screen.
@@ -182,7 +335,148 @@ public final class DshRecoveryViewModel: ObservableObject {
         let normalized = sanitize(incoming)
         snapshot = normalized
         latestSnapshotDate = incoming.generatedAt
+        pluginFailureAnalysis = makePluginFailureAnalysis(for: normalized)
+        _ = refreshDiagnosticPreview()
         return true
+    }
+
+    /// The resolver is read-only.  The optional inspector result is accepted
+    /// only when it describes the same logical Profile; a stale inspection is
+    /// discarded instead of becoming evidence for a different launch.
+    public func setPluginInspection(_ inspection: DshPluginInspectionResult?) {
+        pluginInspection = inspection
+        if let snapshot {
+            pluginFailureAnalysis = makePluginFailureAnalysis(for: snapshot)
+        }
+    }
+
+    public var canRequestPluginRemoval: Bool {
+        guard !pluginRemovalInFlight,
+              actionInFlight == nil,
+              let snapshot,
+              snapshot.context?.profile == "desktop",
+              let originalProfilePath,
+              Self.isDesktopProfilePath(originalProfilePath),
+              let generationID = snapshot.context?.generationID,
+              snapshot.records.last?.generationID == generationID,
+              let analysis = pluginFailureAnalysis,
+              !analysis.hasAmbiguity,
+              analysis.locatedCandidates.count == 1,
+              let candidate = analysis.locatedCandidates.first,
+              let name = candidate.pluginName,
+              !name.isEmpty,
+              candidate.removalPlan.allowed,
+              candidate.removalPlan.requiresExplicitConfirmation else {
+            return false
+        }
+        return candidate.removalPlan.pluginName == name
+    }
+
+    /// Validate a previously issued intent against the currently displayed
+    /// evidence before handing it to the MainWindow coordinator.
+    public func isFreshPluginRemovalRequest(
+        _ request: DshRecoveryPluginRemovalRequest
+    ) -> Bool {
+        guard request.launchID == launchID,
+              pluginRemovalRequest == request,
+              let snapshot,
+              snapshot.context?.profile == request.originalProfile,
+              request.originalProfilePath == originalProfilePath,
+              Self.isDesktopProfilePath(request.originalProfilePath),
+              snapshot.context?.generationID == request.generationID,
+              snapshot.records.last?.generationID == request.generationID,
+              let candidate = pluginFailureAnalysis?.locatedCandidates.first,
+              pluginFailureAnalysis?.locatedCandidates.count == 1 else {
+            return false
+        }
+        return candidate.pluginName == request.pluginName
+            && candidate.removalPlan.token == request.planToken
+    }
+
+    public func pluginRemovalPlan(
+        for request: DshRecoveryPluginRemovalRequest
+    ) -> DshPluginRemovalPlanPreview? {
+        guard isFreshPluginRemovalRequest(request),
+              let candidate = pluginFailureAnalysis?.locatedCandidates.first,
+              candidate.removalPlan.allowed,
+              candidate.removalPlan.requiresExplicitConfirmation else {
+            return nil
+        }
+        return candidate.removalPlan
+    }
+
+    /// Dispatch a removal intent only when the resolver produced one unique
+    /// non-managed plan for the original desktop Profile.  This method never
+    /// mutates the Profile; the MainWindow coordinator owns the final fresh
+    /// launch/generation check and P01 transaction.
+    @discardableResult
+    public func requestRemovePluginAndRetry() -> Bool {
+        guard canRequestPluginRemoval,
+              let snapshot,
+              let generationID = snapshot.context?.generationID,
+              let candidate = pluginFailureAnalysis?.locatedCandidates.first,
+              let name = candidate.pluginName else {
+            actionMessage = "证据不足，未生成可执行的插件移除目标。"
+            return false
+        }
+        let request = DshRecoveryPluginRemovalRequest(
+            launchID: launchID,
+            planToken: candidate.removalPlan.token,
+            pluginName: name,
+            generationID: generationID,
+            originalProfile: snapshot.context?.profile ?? "",
+            originalProfilePath: originalProfilePath ?? ""
+        )
+        pluginRemovalRequest = request
+        pluginRemovalInFlight = true
+        actionMessage = "正在验证插件移除计划…"
+        actions.removePluginAndRetry(request)
+        return true
+    }
+
+    @discardableResult
+    public func finishPluginRemoval(
+        _ request: DshRecoveryPluginRemovalRequest,
+        message: String? = nil
+    ) -> Bool {
+        guard pluginRemovalInFlight, pluginRemovalRequest == request,
+              request.launchID == launchID else { return false }
+        pluginRemovalInFlight = false
+        pluginRemovalRequest = nil
+        actionMessage = message.map(boundedRedacted)
+        return true
+    }
+
+    private func makePluginFailureAnalysis(
+        for snapshot: DshDiagnosticSnapshot
+    ) -> DshPluginFailureAnalysis {
+        let inspection: DshPluginInspectionResult?
+        if let candidate = pluginInspection,
+           let profile = snapshot.context?.profile,
+           profile == "desktop" {
+            // The inspection API stores the absolute Profile directory.  A
+            // desktop-only screen may still receive a stale result, so only
+            // use it when its path names the desktop Profile.
+            let normalizedPath = candidate.profileDirectory
+                .replacingOccurrences(of: "\\\\", with: "/")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            inspection = normalizedPath.hasSuffix("/profiles/desktop")
+                ? candidate
+                : nil
+        } else {
+            inspection = nil
+        }
+        return pluginResolver.analyze(DshPluginFailureResolverInput(
+            diagnostics: snapshot.records,
+            inspection: inspection
+        ))
+    }
+
+    private static func isDesktopProfilePath(_ path: String) -> Bool {
+        let normalized = path
+            .replacingOccurrences(of: "\\\\", with: "/")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return normalized.hasSuffix("/profiles/desktop")
     }
 
     /// Safe mode is deliberately an explicit capability from the future
@@ -330,7 +624,10 @@ public final class DshRecoveryViewModel: ObservableObject {
     }
 
     private func boundedRedacted(_ value: String) -> String {
-        let redacted = redactor.redact(value)
+        // Keep preview, copy, save, and expanded details on the same
+        // diagnostic boundary. In particular this covers short quoted JSON
+        // fields and user-home paths that the protocol matcher cannot infer.
+        let redacted = redactor.redactDiagnostic(value)
         let data = Data(redacted.utf8)
         guard data.count > maximumDetailBytes else { return redacted }
         var start = data.count - maximumDetailBytes

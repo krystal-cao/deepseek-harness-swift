@@ -165,7 +165,7 @@ public final class DshDiagnosticStore: @unchecked Sendable {
             lock.unlock()
             return false
         }
-        let redacted = redactor.redact(text)
+        let redacted = redactor.redactDiagnostic(text)
         let normalized = normalizedLogChunk(redacted)
         let data = Data(normalized.utf8)
         appendLogDataLocked(data)
@@ -352,7 +352,7 @@ public final class DshDiagnosticStore: @unchecked Sendable {
     }
 
     private func boundedRedacted(_ value: String) -> String {
-        let redacted = redactor.redact(value)
+        let redacted = redactor.redactDiagnostic(value)
         return Self.utf8Truncated(redacted, maxBytes: maximumFieldBytes)
     }
 
@@ -385,7 +385,7 @@ public final class DshDiagnosticStore: @unchecked Sendable {
             try data.write(to: storageURL, options: .atomic)
             persistenceErrorValue = nil
         } catch {
-            persistenceErrorValue = sanitizedStorageError(error)
+            persistenceErrorValue = boundedRedacted(sanitizedStorageError(error))
         }
     }
 
@@ -523,12 +523,12 @@ public final class DshDiagnosticStore: @unchecked Sendable {
 
     private func setLoadError(_ message: String) {
         lock.lock()
-        loadErrorValue = Self.utf8Truncated(redactor.redact(message), maxBytes: maximumFieldBytes)
+        loadErrorValue = boundedRedacted(message)
         lock.unlock()
     }
 
     private func sanitizedStorageError(_ error: Error) -> String {
-        var message = redactor.redact(error.localizedDescription)
+        var message = error.localizedDescription
         if let storagePath = storageURL?.path, !storagePath.isEmpty {
             message = message.replacingOccurrences(of: storagePath, with: "[PATH]")
         }
@@ -536,7 +536,7 @@ public final class DshDiagnosticStore: @unchecked Sendable {
         if !homePath.isEmpty {
             message = message.replacingOccurrences(of: homePath, with: "~")
         }
-        return Self.utf8Truncated(message, maxBytes: maximumFieldBytes)
+        return message
     }
 
     private static func utf8Truncated(_ value: String, maxBytes: Int) -> String {

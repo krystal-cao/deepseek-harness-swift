@@ -62,6 +62,15 @@ public struct DshBridgeOrigin: Equatable, Codable, Sendable {
         self.host = host
         self.port = port
     }
+
+    /// Construct an origin from a URL without accepting path, query, or
+    /// fragment data. The bridge only authorizes the security-origin tuple.
+    public init?(url: URL) {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased(),
+              let port = url.port else { return nil }
+        self.init(scheme: scheme, host: host, port: port)
+    }
 }
 
 /// A snapshot of the only session that may use the bridge at this instant.
@@ -219,6 +228,16 @@ public final class DshBridgeMessageValidator: @unchecked Sendable {
         _ message: DshBridgeIncomingMessage
     ) -> Result<DshBridgeValidatedMessage, DshBridgeMessageValidationError> {
         guard let context = currentContext() else { return .failure(.noCurrentSession) }
+        return validate(message, context: context)
+    }
+
+    /// Validate against one captured context. The WebKit adapter uses this
+    /// overload after taking a single context snapshot, so a concurrent
+    /// navigation/restart cannot mix the old message with a new generation.
+    public func validate(
+        _ message: DshBridgeIncomingMessage,
+        context: DshBridgeValidationContext
+    ) -> Result<DshBridgeValidatedMessage, DshBridgeMessageValidationError> {
         guard context.origin.scheme == "http" else { return .failure(.invalidExpectedOrigin) }
         guard context.origin.host == "127.0.0.1" else { return .failure(.invalidExpectedOrigin) }
         guard (1024...65535).contains(context.origin.port) else { return .failure(.invalidExpectedOrigin) }

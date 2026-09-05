@@ -211,7 +211,7 @@ public final class DshProcessIO: @unchecked Sendable {
             }
         }
         for line in lines {
-            let redacted = redactor.redact(line)
+            let redacted = redactor.redactDiagnostic(line)
             ringBuffer.append(contentsOf: Data((redacted + "\n").utf8))
         }
         if ringBuffer.count > Self.maxLogBytes {
@@ -363,7 +363,7 @@ public final class DshProcessIO: @unchecked Sendable {
 
     private func appendLog(_ line: String) {
         lock.lock()
-        let redacted = redactor.redact(line)
+        let redacted = redactor.redactDiagnostic(line)
         ringBuffer.append(contentsOf: Data((redacted + "\n").utf8))
         if ringBuffer.count > Self.maxLogBytes {
             ringBuffer.removeFirst(ringBuffer.count - Self.maxLogBytes)
@@ -382,7 +382,7 @@ public final class DshProcessIO: @unchecked Sendable {
             stderrPartial = ""
         }
         if let line {
-            let redacted = redactor.redact(line)
+            let redacted = redactor.redactDiagnostic(line)
             ringBuffer.append(contentsOf: Data((redacted + "\n").utf8))
             if ringBuffer.count > Self.maxLogBytes {
                 ringBuffer.removeFirst(ringBuffer.count - Self.maxLogBytes)

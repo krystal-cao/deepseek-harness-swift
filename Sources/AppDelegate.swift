@@ -6,10 +6,18 @@ private enum DshAppDelegateLog {
     static let maximumLength = 600
 
     static func safe(_ error: Error) -> String {
-        let redacted = DshSecretRedactor().redact(error.localizedDescription)
+        let redacted = DshSecretRedactor().redactDiagnostic(error.localizedDescription)
         guard redacted.count > maximumLength else { return redacted }
         return String(redacted.prefix(maximumLength)) + "…"
     }
+}
+
+/// Marks only failures thrown by the P01 recovery handoff. Runtime/Profile
+/// recovery runs in the same operation gate, but its errors must continue
+/// through the original M1 startup/retry path even when a plugin record also
+/// exists on disk.
+private enum DshStartupRecoveryError: Error {
+    case pluginOperation(Error)
 }
 
 @MainActor
@@ -30,7 +38,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             // failed web switch can never make startup retry the bad Profile.
             // Reclaim an orphaned Node process before any recovery path can
             // touch package.json, pnpm-lock.yaml, or node_modules.
-            let profileMutationIsSafe: Bool
+            var startupRecoveryError: Error?
             do {
                 // Startup recovery, snapshot cleanup, and the first launch
                 // share one operation gate. This prevents MainWindow from
@@ -42,6 +50,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                     await SettingsViewModel.shared.recoverPendingRuntimeUpdate()
                     await SettingsViewModel.shared.retryRetainedWebProfileSnapshotCleanup()
 
+                    // P01 recovery runs inside this already-held Runtime /
+                    // Profile gate. Its health hooks call
+                    // restartDshServiceDuringOperation directly, so a
+                    // pending plugin transaction cannot race the first
+                    // ordinary launch or deadlock by reacquiring this gate.
+                    do {
+                        _ = try await MainWindowController.shared
+                            .recoverPendingPluginOperationDuringStartup()
+                    } catch {
+                        // Preserve the exact stage. The outer catch must not
+                        // infer plugin ownership from the mere presence of a
+                        // durable record: a preceding Runtime/Profile step
+                        // may have been the operation that actually failed.
+                        throw DshStartupRecoveryError.pluginOperation(error)
+                    }
+
                     _ = await Task.detached(priority: .utility) {
                         DshVersionManager.shared.cleanupUnreferencedVersions()
                     }.value
@@ -49,12 +73,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                         keeping: DshStateManager.shared.current.runtimeState.webProfileSnapshotID
                     )
                 }
-                profileMutationIsSafe = true
             } catch {
-                profileMutationIsSafe = false
+                // Keep M1's original MainWindow startup classification for
+                // ordinary Runtime/Profile failures. Only the explicitly
+                // marked P01 handoff failure blocks normal launch.
+                if case let .pluginOperation(pluginError) = error as? DshStartupRecoveryError {
+                    startupRecoveryError = pluginError
+                }
                 print("[AppDelegate] Profile recovery deferred until the DSH port is safe:", DshAppDelegateLog.safe(error))
             }
-            _ = profileMutationIsSafe
+            if let startupRecoveryError {
+                // Do not continue into a normal launch after an unresolved
+                // Runtime/Profile/plugin recovery condition. The native
+                // surface retains the redacted diagnostic and exposes only
+                // explicit recovery actions.
+                MainWindowController.shared.blockStartupForRecovery(startupRecoveryError)
+            }
             MainWindowController.shared.launch()
             await SettingsViewModel.shared.refreshCatalog()
             await SettingsViewModel.shared.followLatestIfEnabled()

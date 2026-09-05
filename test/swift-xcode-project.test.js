@@ -52,6 +52,7 @@ const SWIFT_SOURCES = [
   'Service/DshAccessController.swift',
   'Service/DshWebEndpoint.swift',
   'Service/DshSecretRedactor.swift',
+  'Diagnostics/DshDiagnosticExporter.swift',
   'Service/DshRuntimeHealthClient.swift',
   'Service/DshProcessIO.swift',
   'Versions/DshVersionManager.swift',

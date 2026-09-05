@@ -14,6 +14,7 @@ const sources = [
   path.join(testDirectory, '..', 'Sources', 'Service', 'DshLaunchContext.swift'),
   path.join(testDirectory, '..', 'Sources', 'Service', 'DshSecretRedactor.swift'),
   path.join(testDirectory, '..', 'Sources', 'Versions', 'DshVersionManager.swift'),
+  path.join(testDirectory, '..', 'Sources', 'Plugins', 'DshPluginOperationState.swift'),
   path.join(testDirectory, '..', 'Sources', 'Plugins', 'DshPluginManager.swift'),
   path.join(testDirectory, 'swift-web-profile-snapshot-harness.swift'),
 ]

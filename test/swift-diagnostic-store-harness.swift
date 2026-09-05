@@ -49,6 +49,55 @@ struct DiagnosticStoreHarness {
         require(currentLog.contains(DshSecretRedactor.replacement), "logs should retain a redaction marker")
         require(Data(currentLog.utf8).count <= 64, "log buffer must remain bounded")
 
+        // These values are intentionally absent from the redactor's injected
+        // secret set. Store memory and the persisted archive must still apply
+        // the diagnostic boundary for short JSON credentials and home paths.
+        let homePath = FileManager.default.homeDirectoryForCurrentUser.path
+        let shortJSONSamples = #"{"token":"abc"} {"cookie":"sid=abc"} {"authorization":"Bearer abc"}"#
+        let shortArchiveURL = root.appendingPathComponent("short-diagnostics.json")
+        let shortStore = DshDiagnosticStore(
+            storageURL: shortArchiveURL,
+            maximumLogBytes: 4 * 1024,
+            now: { timestamp }
+        )
+        shortStore.beginLaunch(DshDiagnosticLaunchContext(
+            launchID: launchID,
+            generationID: generationID,
+            runtimeVersion: "1.0",
+            profile: "desktop",
+            startedAt: timestamp
+        ))
+        let shortPayload = "\(shortJSONSamples)\npath=\(homePath)/diagnostics"
+        require(shortStore.appendLog(shortPayload, launchID: launchID, generationID: generationID), "short credential log should be accepted")
+        requireNoDiagnosticSecrets(shortStore.diagnosticOutput(for: launchID), homePath: homePath, label: "in-memory log")
+        let shortRecord = shortStore.record(
+            launchID: launchID,
+            generationID: generationID,
+            phase: .connectionValidation,
+            code: .connectionFailed,
+            summary: "连接失败",
+            technicalDetail: shortPayload,
+            retryability: .retryable,
+            source: .healthCheck
+        )
+        require(shortRecord != nil, "short credential record should be accepted")
+        requireNoDiagnosticSecrets(shortRecord?.technicalDetail ?? "", homePath: homePath, label: "in-memory record")
+        let shortReload = DshDiagnosticStore(
+            storageURL: shortArchiveURL,
+            maximumLogBytes: 4 * 1024,
+            now: { timestamp }
+        )
+        requireNoDiagnosticSecrets(
+            shortReload.records(for: launchID).first?.technicalDetail ?? "",
+            homePath: homePath,
+            label: "persisted record"
+        )
+        requireNoDiagnosticSecrets(
+            String(data: try! Data(contentsOf: shortArchiveURL), encoding: .utf8) ?? "",
+            homePath: homePath,
+            label: "persisted archive"
+        )
+
         let suspectedEvidence = DshDiagnosticEvidence(
             source: .pluginInspector,
             confidence: .suspected,
@@ -295,5 +344,15 @@ struct DiagnosticStoreHarness {
         require(oversizedStore.lastLoadError?.contains("大小") == true, "oversized archive should be rejected before decoding")
 
         print("swift diagnostic store harness passed")
+    }
+
+    private static func requireNoDiagnosticSecrets(
+        _ value: String,
+        homePath: String,
+        label: String
+    ) {
+        for sample in ["\"abc\"", "sid=abc", "Bearer abc", homePath] {
+            require(!value.contains(sample), "\(label) leaked \(sample)")
+        }
     }
 }

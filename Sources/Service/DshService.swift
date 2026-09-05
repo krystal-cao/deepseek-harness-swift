@@ -303,6 +303,11 @@ public final class DshService: @unchecked Sendable {
             ordinaryBrowserEnabled: enabled,
             networkExposure: exposure
         )
+        managed.access.commitPolicy(
+            revision: revision,
+            ordinaryBrowserEnabled: enabled,
+            networkExposure: exposure
+        )
     }
 
     /// Enable or disable the separate LAN ingress. The DSH WebServer itself
@@ -325,6 +330,28 @@ public final class DshService: @unchecked Sendable {
             revision: revision,
             ordinaryBrowserEnabled: browserEnabled,
             networkExposure: exposure
+        )
+        managed.access.commitPolicy(
+            revision: revision,
+            ordinaryBrowserEnabled: browserEnabled,
+            networkExposure: exposure
+        )
+    }
+
+    /// Return the policy acknowledged by the currently managed generation.
+    /// Launch contexts are immutable snapshots and therefore intentionally do
+    /// not reflect live settings changes. Callers must bind this lookup to the
+    /// session generation so a stale session cannot authorize another child.
+    public func currentAccessPolicy(for generationID: UUID) -> DshEffectiveAccessPolicy? {
+        guard let managed = currentProcess(),
+              managed.generationID == generationID,
+              managed.process.isRunning else {
+            return nil
+        }
+        let policy = managed.access.currentPolicy
+        return DshEffectiveAccessPolicy(
+            browserAccessEnabled: policy.ordinaryBrowserEnabled,
+            networkExposure: policy.networkExposure
         )
     }
 

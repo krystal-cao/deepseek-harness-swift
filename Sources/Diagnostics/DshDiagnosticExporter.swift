@@ -15,7 +15,10 @@ public struct DshDiagnosticExportMetadata: Equatable, Sendable {
         buildNumber: String? = nil,
         runtimeVersion: String? = nil,
         systemArchitecture: String? = DshDiagnosticExportMetadata.defaultArchitecture,
-        operatingSystem: String? = ProcessInfo.processInfo.operatingSystemVersionString,
+        // Keep the default export to the minimum support bundle. The native
+        // recovery flow does not need to disclose the full OS build; callers
+        // may opt in explicitly when a support request requires it.
+        operatingSystem: String? = nil,
         plugins: [DshDiagnosticExportPlugin] = []
     ) {
         self.appVersion = appVersion
@@ -383,72 +386,7 @@ public struct DshDiagnosticExporter: Sendable {
     }
 
     private func redact(_ value: String) -> String {
-        var output = redactor.redact(value)
-        output = redactSensitiveAssignments(output)
-        let prefixes = pathPrefixes + [FileManager.default.homeDirectoryForCurrentUser.path]
-        for prefix in prefixes where !prefix.isEmpty {
-            output = output.replacingOccurrences(of: prefix, with: "[USER_HOME]")
-        }
-        output = replaceGenericUserPaths(output, root: "/Users/")
-        output = replaceGenericUserPaths(output, root: "/home/")
-        return output
-    }
-
-    /// Cover short fixture credentials as well as the longer protocol-shaped
-    /// values handled by DshSecretRedactor.
-    private func redactSensitiveAssignments(_ value: String) -> String {
-        let keys = ["token", "cookie", "authorization", "password", "api_key", "apikey", "secret"]
-        var output = value
-        for key in keys {
-            var searchStart = output.startIndex
-            while let range = output.range(of: key, options: [.caseInsensitive], range: searchStart..<output.endIndex) {
-                let afterKey = range.upperBound
-                var cursor = afterKey
-                while cursor < output.endIndex, output[cursor].isWhitespace { cursor = output.index(after: cursor) }
-                guard cursor < output.endIndex, output[cursor] == ":" || output[cursor] == "=" else {
-                    searchStart = afterKey
-                    continue
-                }
-                cursor = output.index(after: cursor)
-                while cursor < output.endIndex, output[cursor].isWhitespace { cursor = output.index(after: cursor) }
-                let valueStart = cursor
-                while cursor < output.endIndex {
-                    let character = output[cursor]
-                    if character.isWhitespace || ",;&\r\n\"'".contains(character) { break }
-                    cursor = output.index(after: cursor)
-                }
-                guard valueStart < cursor else {
-                    searchStart = afterKey
-                    continue
-                }
-                output.replaceSubrange(valueStart..<cursor, with: DshSecretRedactor.replacement)
-                searchStart = output.index(valueStart, offsetBy: DshSecretRedactor.replacement.count)
-            }
-        }
-        return output
-    }
-
-    private func replaceGenericUserPaths(_ value: String, root: String) -> String {
-        var output = value
-        var searchStart = output.startIndex
-        while let rootRange = output.range(of: root, range: searchStart..<output.endIndex) {
-            let usernameStart = rootRange.upperBound
-            guard let usernameEnd = output[usernameStart...].firstIndex(of: "/") else {
-                guard usernameStart < output.endIndex else { break }
-                output.replaceSubrange(rootRange.lowerBound..<output.endIndex, with: "[USER_HOME]")
-                break
-            }
-            var pathEnd = usernameEnd
-            while pathEnd < output.endIndex {
-                let character = output[pathEnd]
-                if character.isWhitespace || "\"'<>[]{}(),;".contains(character) { break }
-                pathEnd = output.index(after: pathEnd)
-            }
-            let suffix = String(output[usernameEnd..<pathEnd])
-            output.replaceSubrange(rootRange.lowerBound..<pathEnd, with: "[USER_HOME]" + suffix)
-            searchStart = output.index(rootRange.lowerBound, offsetBy: "[USER_HOME]".count + suffix.count)
-        }
-        return output
+        redactor.redactDiagnostic(value, pathPrefixes: pathPrefixes)
     }
 
     private func iso8601(_ date: Date) -> String {

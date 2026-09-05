@@ -35,6 +35,109 @@ private enum DshSettingsUIMessage {
     }
 }
 
+/// The settings surface deliberately exposes transaction stages, not made-up
+/// percentages.  `prepared` is shown as preparation because the coordinator
+/// has established its durable baseline and has not started package mutation.
+public enum DshPluginOperationDisplayPhase: Equatable, Sendable {
+    case preparing
+    case changing(action: DshPluginOperationAction)
+    case verifying
+    case restoring
+    case completed
+    case recoveryRequired
+
+    public var title: String {
+        switch self {
+        case .preparing: return "准备插件操作"
+        case .changing(let action):
+            switch action {
+            case .install: return "正在安装插件"
+            case .update: return "正在更新插件"
+            case .updateAll: return "正在更新全部插件"
+            case .remove: return "正在卸载插件"
+            }
+        case .verifying: return "正在验证插件状态"
+        case .restoring: return "正在恢复原插件状态"
+        case .completed: return "插件操作完成"
+        case .recoveryRequired: return "插件操作需要恢复"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .preparing: return "hourglass"
+        case .changing: return "arrow.triangle.2.circlepath"
+        case .verifying: return "checkmark.shield"
+        case .restoring: return "arrow.uturn.backward.circle"
+        case .completed: return "checkmark.circle.fill"
+        case .recoveryRequired: return "exclamationmark.triangle.fill"
+        }
+    }
+}
+
+/// The outcome is separate from the phase so a failed mutation that was
+/// safely rolled back can be distinguished from an unresolved or externally
+/// modified Profile.
+public enum DshPluginOperationOutcome: Equatable, Sendable {
+    case succeeded
+    case restored
+    case recoveryRequired
+    case externalModification
+
+    public var title: String {
+        switch self {
+        case .succeeded: return "已完成"
+        case .restored: return "操作失败，已恢复原插件状态"
+        case .recoveryRequired: return "操作失败，仍需恢复"
+        case .externalModification: return "检测到外部修改，未覆盖当前状态"
+        }
+    }
+
+    public var systemImage: String {
+        switch self {
+        case .succeeded: return "checkmark.circle.fill"
+        case .restored: return "arrow.uturn.backward.circle.fill"
+        case .recoveryRequired: return "exclamationmark.triangle.fill"
+        case .externalModification: return "hand.raised.fill"
+        }
+    }
+}
+
+/// The plugin list deliberately keeps the four operational categories visible
+/// even when the user is searching.  `exception` is derived from the latest
+/// read-only inspector result and never inferred from a pnpm exit code.
+public enum DshPluginListCategory: String, CaseIterable, Identifiable, Sendable {
+    case managed = "受管理"
+    case local = "本地"
+    case regular = "普通"
+    case exception = "异常"
+
+    public var id: String { rawValue }
+}
+
+/// A retry is an in-memory UI affordance, not a second durable transaction.
+/// The coordinator creates a fresh operation ID when the retry is accepted.
+public struct DshPluginRetryRequest: Equatable, Sendable {
+    public let action: DshPluginOperationAction
+    public let targetPackage: String?
+
+    public init(action: DshPluginOperationAction, targetPackage: String? = nil) {
+        self.action = action
+        self.targetPackage = targetPackage
+    }
+}
+
+private extension DshPluginOperationAction {
+    var settingsPreparationDetail: String {
+        switch self {
+        case .install: return "正在准备安装事务…"
+        case .update: return "正在准备更新事务…"
+        case .updateAll: return "正在准备批量更新事务…"
+        case .remove: return "正在准备卸载事务…"
+        }
+    }
+}
+
 @MainActor
 public final class SettingsViewModel: ObservableObject {
     public static let shared = SettingsViewModel()
@@ -65,6 +168,8 @@ public final class SettingsViewModel: ObservableObject {
 
     @Published public var installedPlugins: [DshPluginItem] = []
     @Published public var outdatedPluginsMap: [String: String] = [:]
+    @Published public var pluginSearchText: String = ""
+    @Published public var pluginExceptionsOnly: Bool = false
     @Published public private(set) var pluginInspectionResult: DshPluginInspectionResult?
     @Published public private(set) var isInspectingPlugins = false
     @Published public private(set) var pluginInspectionMessage: String?
@@ -89,6 +194,10 @@ public final class SettingsViewModel: ObservableObject {
     @Published public private(set) var pendingPluginInstallSpec: String? = nil
     @Published public private(set) var pendingPluginUpdate: DshPendingPluginUpdate? = nil
     @Published public var pluginStatusMessage: String? = nil
+    @Published public private(set) var pluginOperationPhase: DshPluginOperationDisplayPhase?
+    @Published public private(set) var pluginOperationOutcome: DshPluginOperationOutcome?
+    @Published public private(set) var pluginOperationDetail: String?
+    @Published public private(set) var retryablePluginOperation: DshPluginRetryRequest?
     @Published public var alertMessage: String? = nil
 
     /// Mutating the selected Profile or Runtime is suspended while a recovery
@@ -97,23 +206,431 @@ public final class SettingsViewModel: ObservableObject {
     /// states so the user can still understand the failure.
     public var pluginMutationsAllowed: Bool {
         let state = DshStateManager.shared.current
+        let coordinator = DshPluginOperationCoordinator.shared
         guard state.runtimeState.phase == .idle,
               state.runtimeState.previous == nil,
               state.runtimeState.pending == nil,
               state.runtimeState.transactionID == nil,
               state.runtimeState.webProfileSnapshotID == nil,
               state.pendingProfileSwitch == nil,
-              !MainWindowController.shared.hasUnresolvedRecovery else { return false }
+              !MainWindowController.shared.hasUnresolvedRecovery,
+              coordinator.pendingOperation == nil,
+              !coordinator.hasPersistedOperationRecord else { return false }
         return MainWindowController.shared.currentLaunchContext?.purpose != .recovery
+    }
+
+    /// The filtered view is derived from the current list and the latest
+    /// inspector result, so filtering stays read-only and cannot mutate the
+    /// Profile. Search covers the fields users can actually recognize in the
+    /// row: package name, version and description.
+    public var filteredInstalledPlugins: [DshPluginItem] {
+        let query = pluginSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return installedPlugins.filter { plugin in
+            if pluginExceptionsOnly && pluginCategory(for: plugin) != .exception {
+                return false
+            }
+            guard !query.isEmpty else { return true }
+            return [plugin.name, plugin.version, plugin.description]
+                .compactMap { $0 }
+                .contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+    }
+
+    public func plugins(in category: DshPluginListCategory) -> [DshPluginItem] {
+        filteredInstalledPlugins.filter { pluginCategory(for: $0) == category }
+    }
+
+    public func pluginCategory(for plugin: DshPluginItem) -> DshPluginListCategory {
+        if isPluginException(plugin) { return .exception }
+        if plugin.isManaged { return .managed }
+        if plugin.isLocal { return .local }
+        return .regular
+    }
+
+    /// A retry is safe only after the previous operation reached a terminal
+    /// UI result that proves rollback completed.  A committed record, a
+    /// recoveryRequired record, a corrupt record, or a pending age override
+    /// must make the affordance disappear. The actual attempt always uses the
+    /// normal release-age policy and can therefore reopen the one-time
+    /// confirmation if npm rejects it again.
+    public var canRetryPluginOperation: Bool {
+        guard pluginOperationPhase == .completed,
+              pluginOperationOutcome == .restored,
+              retryablePluginOperation != nil,
+              pendingPluginInstallSpec == nil,
+              pendingPluginUpdate == nil,
+              !isOperatingPlugin,
+              !isSwitchingProfile else { return false }
+        guard case .absent = DshPluginOperationCoordinator.shared.persistedStatus else {
+            return false
+        }
+        return pluginMutationsAllowed
+    }
+
+    public func retryLastPluginOperation() {
+        guard canRetryPluginOperation, let request = retryablePluginOperation else {
+            return
+        }
+        let accepted: Bool
+        switch request.action {
+        case .install:
+            guard let spec = request.targetPackage else { return }
+            accepted = startPluginInstall(spec: spec, ignoringMinimumReleaseAge: false)
+        case .update:
+            guard let name = request.targetPackage else { return }
+            accepted = startPluginUpdate(name: name, ignoringMinimumReleaseAge: false)
+        case .updateAll:
+            accepted = startPluginUpdateAll(ignoringMinimumReleaseAge: false)
+        case .remove:
+            guard let name = request.targetPackage else { return }
+            accepted = startPluginRemove(name: name)
+        }
+        if accepted {
+            retryablePluginOperation = nil
+        }
+    }
+
+    private func isPluginException(_ plugin: DshPluginItem) -> Bool {
+        guard let result = pluginInspectionResult else { return false }
+        return result.items.contains { item in
+            guard item.name == plugin.name else { return false }
+            switch item.status {
+            case .healthy, .disabled:
+                return false
+            case .missingPackage, .notComposed, .patchReferenceMissing,
+                 .duplicateBundle, .unavailable, .uncertain:
+                return true
+            }
+        }
+    }
+
+    private func markRetryablePluginOperation(
+        action: DshPluginOperationAction,
+        targetPackage: String?
+    ) {
+        guard pluginOperationPhase == .completed,
+              pluginOperationOutcome == .restored,
+              pendingPluginInstallSpec == nil,
+              pendingPluginUpdate == nil,
+              case .absent = DshPluginOperationCoordinator.shared.persistedStatus else {
+            retryablePluginOperation = nil
+            return
+        }
+        retryablePluginOperation = DshPluginRetryRequest(
+            action: action,
+            targetPackage: targetPackage
+        )
+    }
+
+    private func clearRetryablePluginOperation() {
+        retryablePluginOperation = nil
     }
 
     private var isFollowingLatest = false
     private var catalogRequestGeneration = 0
     private var pluginStatusDismissTask: Task<Void, Never>?
     private var pluginStatusGeneration = 0
+    private var pluginOperationProgressTask: Task<Void, Never>?
+    private var pluginOperationDismissTask: Task<Void, Never>?
+    private var pluginOperationDisplayGeneration = 0
 
     private var currentAppVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+    }
+
+    /// Capture the desktop launch boundary once, while the caller owns
+    /// MainWindowController's wider Runtime/Profile operation gate. Plugin
+    /// mutations never follow the currently selected Profile after this
+    /// point, and recovery/web contexts are rejected before any service stop.
+    private func makeDesktopPluginOperationContext() throws -> DshLaunchContext {
+        let state = DshStateManager.shared.current
+        guard state.appProfile == .desktop,
+              let context = DshLaunchContext.makeStartup(from: state),
+              context.profile == .desktop,
+              context.purpose == .normal else {
+            throw DshPluginOperationError.desktopProfileRequired
+        }
+        try context.validate()
+        return context
+    }
+
+    /// Execute one desktop plugin mutation through the durable P01
+    /// coordinator. The ordinary restart path is the health gate for both
+    /// the new tree and a restored baseline; no UI success state is published
+    /// until `perform` has reached `committed`.
+    private func executeDesktopPluginOperation(
+        context: DshLaunchContext,
+        action: DshPluginOperationAction,
+        targetPackage: String? = nil,
+        targetPackages: [String] = [],
+        ignoringMinimumReleaseAge: Bool = false
+    ) async throws -> DshPluginOperationResult {
+        guard context.isFresh(in: DshStateManager.shared.current) else {
+            throw DshLaunchContextError.staleContext
+        }
+        let request = DshPluginOperationRequest(
+            action: action,
+            profile: .desktop,
+            profileDirectory: context.profileDirectory,
+            targetPackage: targetPackage,
+            targetPackages: targetPackages
+        )
+        let registry = context.runtimeDescriptor.registry
+        let hooks = DshPluginOperationHooks(
+            prepareForMutation: {
+                // Use the complete Profile mutation boundary: it stops the
+                // managed child, reaps an orphaned process, and confirms the
+                // selected port is safe before the snapshot is taken.
+                try await DshService.shared.prepareForProfileMutation(context: context)
+            },
+            mutate: { request in
+                switch request.action {
+                case .install:
+                    guard let spec = request.targetPackage else {
+                        throw DshPluginOperationError.recoveryRequired("安装事务缺少插件 spec")
+                    }
+                    try await DshPluginManager.shared.addPlugin(
+                        spec: spec,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
+                        profileDirectory: request.profileDirectory,
+                        profile: request.profile,
+                        registry: registry
+                    )
+                case .update:
+                    guard let name = request.targetPackage else {
+                        throw DshPluginOperationError.recoveryRequired("更新事务缺少插件名称")
+                    }
+                    try await DshPluginManager.shared.updatePlugin(
+                        name: name,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
+                        profileDirectory: request.profileDirectory,
+                        profile: request.profile,
+                        registry: registry
+                    )
+                case .updateAll:
+                    try await DshPluginManager.shared.updateAllPlugins(
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
+                        profileDirectory: request.profileDirectory,
+                        profile: request.profile,
+                        registry: registry
+                    )
+                case .remove:
+                    guard let name = request.targetPackage else {
+                        throw DshPluginOperationError.recoveryRequired("卸载事务缺少插件名称")
+                    }
+                    try await DshPluginManager.shared.removePlugin(
+                        name: name,
+                        profileDirectory: request.profileDirectory,
+                        profile: request.profile,
+                        registry: registry
+                    )
+                }
+            },
+            verify: { _ in
+                _ = try await MainWindowController.shared
+                    .restartDshServiceDuringOperation(context: context)
+            },
+            verifyRestored: { _ in
+                _ = try await MainWindowController.shared
+                    .restartDshServiceDuringOperation(context: context)
+            }
+        )
+        let coordinator = DshPluginOperationCoordinator.shared
+        let result = try await coordinator.perform(request, hooks: hooks)
+        guard result.phase == .committed else {
+            throw DshPluginOperationError.recoveryRequired("插件事务未提交")
+        }
+        // The verify hook above has completed an ordinary desktop health
+        // start. Clear the retained commit record before publishing success,
+        // otherwise the mutation gate would leave every subsequent plugin
+        // action disabled until the whole app was restarted. A force-quit
+        // before this cleanup still leaves the durable committed record for
+        // startup recovery to finalize.
+        try await coordinator.finalizeCommittedOperation(operationID: result.operationID)
+        return result
+    }
+
+    private func pluginOperationFailureMessage(
+        actionDescription: String,
+        error: Error
+    ) -> String {
+        let safeError = DshSettingsUIMessage.safe(error)
+        if let pending = DshPluginOperationCoordinator.shared.pendingOperation {
+            if pending.requiresRecovery {
+                return "\(actionDescription)失败，自动恢复未完成，事务已保留，请重启 DSH 后继续恢复：\(safeError)"
+            }
+            if pending.phase == .committed {
+                return "\(actionDescription)未执行：已有插件事务已提交，但事务快照尚未清理，请重启 DSH 后重试：\(safeError)"
+            }
+        }
+        if let operationError = error as? DshPluginOperationError {
+            switch operationError {
+            case .recoveryRequired, .externalModification, .operationInterruptedDuringMutation:
+                return "\(actionDescription)失败，自动恢复未完成，事务已保留，请重启 DSH 后继续恢复：\(safeError)"
+            default:
+                break
+            }
+        }
+        return "\(actionDescription)失败，已恢复原插件状态：\(safeError)"
+    }
+
+    /// The coordinator intentionally has no UI dependency. Polling its
+    /// read-only durable record lets the settings view follow real phase
+    /// transitions, including the small window before `prepared` is written.
+    private func beginPluginOperationProgress(action: DshPluginOperationAction) {
+        pluginOperationDisplayGeneration &+= 1
+        pluginOperationDismissTask?.cancel()
+        pluginOperationDismissTask = nil
+        pluginOperationProgressTask?.cancel()
+        pluginOperationProgressTask = nil
+        pluginOperationPhase = .preparing
+        pluginOperationOutcome = nil
+        pluginOperationDetail = nil
+
+        pluginOperationProgressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if let operation = DshPluginOperationCoordinator.shared.pendingOperation {
+                    self.applyPluginOperationState(operation)
+                }
+                try? await Task.sleep(nanoseconds: 120_000_000)
+            }
+        }
+        // The first read is useful when snapshot creation has already
+        // completed before SwiftUI gets its next rendering pass.
+        if let operation = DshPluginOperationCoordinator.shared.pendingOperation {
+            applyPluginOperationState(operation)
+        } else {
+            pluginOperationDetail = action.settingsPreparationDetail
+        }
+    }
+
+    private func applyPluginOperationState(_ operation: DshPluginOperationState) {
+        switch operation.phase {
+        case .prepared:
+            pluginOperationPhase = .preparing
+        case .mutating:
+            pluginOperationPhase = .changing(action: operation.action)
+        case .verifying:
+            pluginOperationPhase = .verifying
+        case .committed:
+            pluginOperationPhase = .completed
+            pluginOperationOutcome = .succeeded
+        case .restoring:
+            pluginOperationPhase = .restoring
+        case .recoveryRequired:
+            pluginOperationPhase = .recoveryRequired
+            pluginOperationOutcome = operation.lastError?.contains("外部修改") == true
+                ? .externalModification
+                : .recoveryRequired
+        }
+        pluginOperationDetail = operation.lastError.map(DshSettingsUIMessage.safe)
+    }
+
+    private func finishPluginOperationProgress() {
+        pluginOperationProgressTask?.cancel()
+        pluginOperationProgressTask = nil
+    }
+
+    /// A release-age prompt raised by the read-only resolver is not a failed
+    /// P01 operation. Clear transient progress so the confirmation can appear
+    /// immediately, without showing a misleading rollback result.
+    private func finishPluginUpdatePreflight(_ pending: DshPendingPluginUpdate) {
+        isOperatingPlugin = false
+        operatingPluginName = nil
+        pluginOperationDisplayGeneration &+= 1
+        pluginOperationDismissTask?.cancel()
+        pluginOperationDismissTask = nil
+        finishPluginOperationProgress()
+        pluginOperationPhase = nil
+        pluginOperationOutcome = nil
+        pluginOperationDetail = nil
+        clearRetryablePluginOperation()
+        pendingPluginUpdate = pending
+    }
+
+    private func schedulePluginOperationSuccessDismissal() {
+        pluginOperationDisplayGeneration &+= 1
+        let generation = pluginOperationDisplayGeneration
+        pluginOperationDismissTask?.cancel()
+        pluginOperationDismissTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled,
+                  let self,
+                  self.pluginOperationDisplayGeneration == generation,
+                  self.pluginOperationPhase == .completed,
+                  self.pluginOperationOutcome == .succeeded,
+                  !self.isOperatingPlugin else { return }
+            self.pluginOperationPhase = nil
+            self.pluginOperationOutcome = nil
+            self.pluginOperationDetail = nil
+            self.pluginOperationDismissTask = nil
+        }
+    }
+
+    private func finishPluginOperationSuccessfully(_ detail: String) {
+        finishPluginOperationProgress()
+        pluginOperationPhase = .completed
+        pluginOperationOutcome = .succeeded
+        pluginOperationDetail = detail
+        schedulePluginOperationSuccessDismissal()
+    }
+
+    private func finishPluginOperationFailed(actionDescription: String, error: Error) {
+        pluginOperationDisplayGeneration &+= 1
+        pluginOperationDismissTask?.cancel()
+        pluginOperationDismissTask = nil
+        let pending = DshPluginOperationCoordinator.shared.pendingOperation
+        let outcome: DshPluginOperationOutcome
+        if let operationError = error as? DshPluginOperationError,
+           case .externalModification = operationError {
+            outcome = .externalModification
+        } else if pending?.lastError?.contains("外部修改") == true {
+            outcome = .externalModification
+        } else if pending?.requiresRecovery == true {
+            outcome = .recoveryRequired
+        } else if let operationError = error as? DshPluginOperationError {
+            switch operationError {
+            case .recoveryRequired, .operationInterruptedDuringMutation, .persistenceConflict:
+                outcome = .recoveryRequired
+            default:
+                outcome = .restored
+            }
+        } else {
+            outcome = .restored
+        }
+
+        finishPluginOperationProgress()
+        switch outcome {
+        case .externalModification, .recoveryRequired:
+            pluginOperationPhase = .recoveryRequired
+        case .restored:
+            pluginOperationPhase = .completed
+        case .succeeded:
+            pluginOperationPhase = .completed
+        }
+        pluginOperationOutcome = outcome
+        let safeError = DshSettingsUIMessage.safe(error)
+        pluginOperationDetail = "\(actionDescription)：\(safeError)"
+    }
+
+    private func restorePersistedPluginOperationState() {
+        let coordinator = DshPluginOperationCoordinator.shared
+        guard let operation = coordinator.pendingOperation else {
+            if coordinator.hasPersistedOperationRecord {
+                pluginOperationPhase = .recoveryRequired
+                pluginOperationOutcome = .recoveryRequired
+                pluginOperationDetail = "插件事务记录无法读取，已停止写入，请重启 DSH 后继续恢复。"
+            }
+            return
+        }
+        applyPluginOperationState(operation)
+        if operation.phase == .committed {
+            // A retained commit can be restored before startup recovery
+            // removes its durable record. It is still a success banner and
+            // must follow the same 2.5-second lifetime as a live completion.
+            schedulePluginOperationSuccessDismissal()
+        }
     }
 
     private init() {
@@ -168,6 +685,7 @@ public final class SettingsViewModel: ObservableObject {
             at: settingsProfileDirectory,
             outdatedMap: outdatedPluginsMap
         )
+        restorePersistedPluginOperationState()
 
         if let diagnostic = DshStateManager.shared.current.runtimeState.lastDiagnostic {
             self.alertMessage = diagnostic
@@ -533,39 +1051,58 @@ public final class SettingsViewModel: ObservableObject {
             alertMessage = "当前已有插件操作排队，请稍后重试。"
             return false
         }
+        clearRetryablePluginOperation()
         isOperatingPlugin = true
         clearPluginStatus()
         operatingPluginName = DshSettingsUIMessage.safe("正在更新 \(name)…")
+        beginPluginOperationProgress(action: .update)
         Task {
             do {
-                try await MainWindowController.shared.withRuntimeOperation {
-                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
-                        throw DshLaunchContextError.invalidProfileName
+                if !ignoringMinimumReleaseAge {
+                    let preflight = try await MainWindowController.shared.withRuntimeOperation {
+                        let context = try self.makeDesktopPluginOperationContext()
+                        return try await DshPluginManager.shared.preflightPluginUpdate(
+                            name: name,
+                            profileDirectory: context.profileDirectory,
+                            profile: context.profile,
+                            registry: context.runtimeDescriptor.registry
+                        )
                     }
-                    try await DshPluginManager.shared.updatePlugin(
-                        name: name,
-                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
-                        profileDirectory: context.profileDirectory,
-                        profile: context.profile,
-                        registry: context.runtimeDescriptor.registry
+                    if preflight == .minimumReleaseAgeViolation {
+                        self.finishPluginUpdatePreflight(.plugin(name))
+                        return
+                    }
+                }
+                _ = try await MainWindowController.shared.withRuntimeOperation {
+                    let context = try self.makeDesktopPluginOperationContext()
+                    return try await self.executeDesktopPluginOperation(
+                        context: context,
+                        action: .update,
+                        targetPackage: name,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
                     )
-                    self.outdatedPluginsMap.removeValue(forKey: name)
-                    self.refreshPlugins(for: context)
-                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
-                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationSuccessfully("插件 \(name) 已验证并提交")
+                self.outdatedPluginsMap.removeValue(forKey: name)
+                self.refreshPlugins()
                 self.showPluginStatus("插件 \(name) 更新成功，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationFailed(actionDescription: "插件 \(name) 更新", error: error)
                 if !ignoringMinimumReleaseAge,
                    DshPluginManager.isMinimumReleaseAgeViolation(error) {
+                    clearRetryablePluginOperation()
                     self.pendingPluginUpdate = .plugin(name)
                     return
                 }
-                self.alertMessage = DshSettingsUIMessage.safe(error)
+                markRetryablePluginOperation(action: .update, targetPackage: name)
+                self.alertMessage = self.pluginOperationFailureMessage(
+                    actionDescription: "插件 \(name) 更新",
+                    error: error
+                )
             }
         }
         return true
@@ -581,42 +1118,66 @@ public final class SettingsViewModel: ObservableObject {
             alertMessage = "当前已有插件操作排队，请稍后重试。"
             return false
         }
+        clearRetryablePluginOperation()
         isOperatingPlugin = true
         clearPluginStatus()
         let count = installedPlugins.filter(\.hasUpdate).count
         operatingPluginName = DshSettingsUIMessage.safe(count > 0
             ? "正在更新插件（共 \(count) 个）…"
             : "正在更新插件…")
+        beginPluginOperationProgress(action: .updateAll)
+        // The former “插件更新完成，正在重启 DSH 服务…” progress phase is
+        // now owned by the coordinator's verify hook; it cannot be published
+        // as success before the transaction reaches committed.
         Task {
             do {
-                try await MainWindowController.shared.withRuntimeOperation {
-                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
-                        throw DshLaunchContextError.invalidProfileName
+                if !ignoringMinimumReleaseAge {
+                    let preflight = try await MainWindowController.shared.withRuntimeOperation {
+                        let context = try self.makeDesktopPluginOperationContext()
+                        return try await DshPluginManager.shared.preflightAllPluginUpdates(
+                            profileDirectory: context.profileDirectory,
+                            profile: context.profile,
+                            registry: context.runtimeDescriptor.registry
+                        )
                     }
-                    try await DshPluginManager.shared.updateAllPlugins(
-                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
-                        profileDirectory: context.profileDirectory,
-                        profile: context.profile,
-                        registry: context.runtimeDescriptor.registry
+                    if preflight == .minimumReleaseAgeViolation {
+                        self.finishPluginUpdatePreflight(.all)
+                        return
+                    }
+                }
+                _ = try await MainWindowController.shared.withRuntimeOperation {
+                    let context = try self.makeDesktopPluginOperationContext()
+                    let targetPackages = DshPluginManager.shared.listPlugins(at: context.profileDirectory)
+                        .filter { !$0.isManaged && !$0.isLocal }
+                        .map(\.name)
+                    return try await self.executeDesktopPluginOperation(
+                        context: context,
+                        action: .updateAll,
+                        targetPackages: targetPackages,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
                     )
-                    self.outdatedPluginsMap.removeAll()
-                    self.refreshPlugins(for: context)
-                    self.operatingPluginName = "插件更新完成，正在重启 DSH 服务…"
-                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
-                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationSuccessfully("全部插件已验证并提交")
+                self.outdatedPluginsMap.removeAll()
+                self.refreshPlugins()
                 self.showPluginStatus("全部插件已更新至最新版本，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationFailed(actionDescription: "全部插件更新", error: error)
                 if !ignoringMinimumReleaseAge,
                    DshPluginManager.isMinimumReleaseAgeViolation(error) {
+                    clearRetryablePluginOperation()
                     self.pendingPluginUpdate = .all
                     return
                 }
-                self.alertMessage = DshSettingsUIMessage.safe(error)
+                markRetryablePluginOperation(action: .updateAll, targetPackage: nil)
+                self.alertMessage = self.pluginOperationFailureMessage(
+                    actionDescription: "全部插件更新",
+                    error: error
+                )
             }
         }
         return true
@@ -1314,75 +1875,175 @@ public final class SettingsViewModel: ObservableObject {
             return false
         }
         guard !trimmedSpec.isEmpty else { return false }
+        clearRetryablePluginOperation()
         isOperatingPlugin = true
         clearPluginStatus()
         operatingPluginName = DshSettingsUIMessage.safe("正在安装插件 \(trimmedSpec)…")
+        beginPluginOperationProgress(action: .install)
         Task {
             do {
-                try await MainWindowController.shared.withRuntimeOperation {
-                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
-                        throw DshLaunchContextError.invalidProfileName
-                    }
-                    try await DshPluginManager.shared.addPlugin(
-                        spec: trimmedSpec,
-                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge,
-                        profileDirectory: context.profileDirectory,
-                        profile: context.profile,
-                        registry: context.runtimeDescriptor.registry
+                _ = try await MainWindowController.shared.withRuntimeOperation {
+                    let context = try self.makeDesktopPluginOperationContext()
+                    return try await self.executeDesktopPluginOperation(
+                        context: context,
+                        action: .install,
+                        targetPackage: trimmedSpec,
+                        ignoringMinimumReleaseAge: ignoringMinimumReleaseAge
                     )
-                    self.refreshPlugins(for: context)
-                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
-                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationSuccessfully("插件 \(trimmedSpec) 已验证并提交")
+                self.refreshPlugins()
                 self.showPluginStatus("插件 \(trimmedSpec) 安装成功，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationFailed(actionDescription: "插件 \(trimmedSpec) 安装", error: error)
                 if !ignoringMinimumReleaseAge,
                    DshPluginManager.isMinimumReleaseAgeViolation(error) {
+                    clearRetryablePluginOperation()
                     self.pendingPluginInstallSpec = trimmedSpec
                     return
                 }
-                let message = DshSettingsUIMessage.safe(error).trimmingCharacters(in: .whitespacesAndNewlines)
-                self.alertMessage = message.isEmpty ? "安装插件 \(trimmedSpec) 失败" : message
+                markRetryablePluginOperation(action: .install, targetPackage: trimmedSpec)
+                self.alertMessage = self.pluginOperationFailureMessage(
+                    actionDescription: "插件 \(trimmedSpec) 安装",
+                    error: error
+                )
             }
         }
         return true
     }
 
     public func removePlugin(name: String) {
-        guard pluginMutationsAllowed, !isOperatingPlugin, !isSwitchingProfile else { return }
+        _ = startPluginRemove(name: name)
+    }
+
+    /// Execute a resolver-approved recovery removal through the same P01
+    /// coordinator used by Settings. This boundary intentionally does not
+    /// consult pluginMutationsAllowed: the recovery surface is the caller of
+    /// this narrowly-scoped method, and it has already proven the launch
+    /// identities. Every mutable state and Profile path is revalidated here
+    /// before P01 is allowed to stop the service and snapshot the Profile.
+    public func removePluginFromRecovery(
+        plan: DshPluginRemovalPlanPreview,
+        request: DshRecoveryPluginRemovalRequest,
+        context: DshLaunchContext
+    ) async throws -> DshPluginOperationResult {
+        let state = DshStateManager.shared.current
+        let expectedProfilePath = DshLaunchContext
+            .profileDirectory(for: .desktop)
+            .standardizedFileURL
+            .path
+        let requestPath = request.originalProfilePath
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard request.isExecutable,
+              plan.allowed,
+              plan.requiresExplicitConfirmation,
+              plan.pluginName == request.pluginName,
+              request.originalProfile == DshAppProfile.desktop.rawValue,
+              context.launchID == request.launchID,
+              context.profile == .desktop,
+              context.originalProfile == .desktop,
+              context.purpose == .normal,
+              context.profileDirectory.standardizedFileURL.path == requestPath,
+              context.profileDirectory.standardizedFileURL.path == expectedProfilePath,
+              state.appProfile == .desktop,
+              state.runtimeState.phase == .idle,
+              state.runtimeState.previous == nil,
+              state.runtimeState.pending == nil,
+              state.runtimeState.transactionID == nil,
+              state.runtimeState.webProfileSnapshotID == nil,
+              state.pendingProfileSwitch == nil,
+              context.isFresh(in: state),
+              DshPluginOperationCoordinator.shared.persistedStatus == .absent,
+              !isOperatingPlugin,
+              !isSwitchingProfile else {
+            throw DshPluginOperationError.runtimeOrProfileRecoveryPending
+        }
+
+        clearRetryablePluginOperation()
+        isOperatingPlugin = true
+        clearPluginStatus()
+        operatingPluginName = DshSettingsUIMessage.safe(
+            "正在从恢复界面卸载插件 \(request.pluginName)…"
+        )
+        beginPluginOperationProgress(action: .remove)
+        do {
+            // No minimum-release-age override exists on remove. The only
+            // mutation is the P01 remove transaction below.
+            let result = try await MainWindowController.shared.withRuntimeOperation {
+                try await self.executeDesktopPluginOperation(
+                    context: context,
+                    action: .remove,
+                    targetPackage: request.pluginName
+                )
+            }
+            isOperatingPlugin = false
+            operatingPluginName = nil
+            finishPluginOperationSuccessfully(
+                "插件 \(request.pluginName) 已移除并通过普通健康验证"
+            )
+            outdatedPluginsMap.removeValue(forKey: request.pluginName)
+            refreshPlugins(for: context)
+            showPluginStatus("插件 \(request.pluginName) 已卸载，服务已重启")
+            return result
+        } catch {
+            isOperatingPlugin = false
+            operatingPluginName = nil
+            finishPluginOperationFailed(
+                actionDescription: "恢复操作卸载插件 \(request.pluginName)",
+                error: error
+            )
+            markRetryablePluginOperation(
+                action: .remove,
+                targetPackage: request.pluginName
+            )
+            alertMessage = pluginOperationFailureMessage(
+                actionDescription: "恢复操作卸载插件 \(request.pluginName)",
+                error: error
+            )
+            throw error
+        }
+    }
+
+    @discardableResult
+    private func startPluginRemove(name: String) -> Bool {
+        guard pluginMutationsAllowed, !isOperatingPlugin, !isSwitchingProfile else { return false }
+        clearRetryablePluginOperation()
         isOperatingPlugin = true
         clearPluginStatus()
         operatingPluginName = DshSettingsUIMessage.safe("正在卸载插件 \(name)…")
+        beginPluginOperationProgress(action: .remove)
         Task {
             do {
-                try await MainWindowController.shared.withRuntimeOperation {
-                    guard let context = DshLaunchContext.makeStartup(from: DshStateManager.shared.current) else {
-                        throw DshLaunchContextError.invalidProfileName
-                    }
-                    try await DshPluginManager.shared.removePlugin(
-                        name: name,
-                        profileDirectory: context.profileDirectory,
-                        profile: context.profile,
-                        registry: context.runtimeDescriptor.registry
+                _ = try await MainWindowController.shared.withRuntimeOperation {
+                    let context = try self.makeDesktopPluginOperationContext()
+                    return try await self.executeDesktopPluginOperation(
+                        context: context,
+                        action: .remove,
+                        targetPackage: name
                     )
-                    self.outdatedPluginsMap.removeValue(forKey: name)
-                    self.refreshPlugins(for: context)
-                    _ = try await MainWindowController.shared.restartDshServiceDuringOperation(context: context)
-                    self.refreshPlugins(for: context)
                 }
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
+                self.finishPluginOperationSuccessfully("插件 \(name) 已验证并提交")
+                self.outdatedPluginsMap.removeValue(forKey: name)
+                self.refreshPlugins()
                 self.showPluginStatus("插件 \(name) 已卸载，服务已重启")
             } catch {
                 self.isOperatingPlugin = false
                 self.operatingPluginName = nil
-                self.alertMessage = DshSettingsUIMessage.safe(error)
+                self.finishPluginOperationFailed(actionDescription: "插件 \(name) 卸载", error: error)
+                self.markRetryablePluginOperation(action: .remove, targetPackage: name)
+                self.alertMessage = self.pluginOperationFailureMessage(
+                    actionDescription: "插件 \(name) 卸载",
+                    error: error
+                )
             }
         }
+        return true
     }
 
     public func saveGeneralSettings() {

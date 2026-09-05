@@ -331,6 +331,29 @@ public final class DshWebShell {
         configureRootView()
     }
 
+    /// Bind the native bridge to the current WebKit session. The shell keeps
+    /// one WebView for its lifetime, so this must be refreshed for every new
+    /// launch/generation and cleared before a restart or failure.
+    public func updateBridgeValidationContext(
+        launchID: UUID,
+        generationID: UUID,
+        origin: DshBridgeOrigin,
+        allowedMessageTypes: Set<DshBridgeMessageType> = DshBridgeMessageType.normalCapability
+    ) {
+        bridgeHandler.updateValidationContext(DshBridgeValidationContext(
+            webViewIdentity: DshBridgeWebViewIdentity(object: webView),
+            launchID: launchID,
+            generationID: generationID,
+            origin: origin,
+            allowedMessageTypes: allowedMessageTypes
+        ))
+    }
+
+    /// Disable native actions while there is no authenticated live session.
+    public func clearBridgeValidationContext() {
+        bridgeHandler.updateValidationContext(nil)
+    }
+
     public func syncTheme(_ theme: String) {
         let serialized = theme == "claude" ? "\"claude\"" : "\"default\""
         evaluate("""

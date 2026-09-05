@@ -310,6 +310,16 @@ test('M1 launch and settings boundaries reject stale work and retain blocked con
   assert.match(APP_SOURCE, /MainWindowController\.shared\.withRuntimeOperation \{[\s\S]*prepareForProfileMutation\(\)[\s\S]*recoverPendingProfileSwitch\(\)[\s\S]*recoverPendingRuntimeUpdate\(\)/)
 })
 
+test('startup recovery classifies only the plugin handoff as plugin recovery', () => {
+  const startup = APP_SOURCE.slice(
+    APP_SOURCE.indexOf('MainWindowController.shared.withRuntimeOperation'),
+    APP_SOURCE.indexOf('MainWindowController.shared.launch')
+  )
+  assert.match(startup, /throw DshStartupRecoveryError\.pluginOperation\(error\)/)
+  assert.match(APP_SOURCE, /if case let \.pluginOperation\(pluginError\) = error as\? DshStartupRecoveryError/)
+  assert.doesNotMatch(APP_SOURCE, /hasPersistedOperationRecord/)
+})
+
 test('the managed host webserver dependency is hidden from user plugin management', () => {
   assert.match(PLUGIN_SOURCE, /internalPluginDependencyNames[\s\S]*@deepseek-ai\/dsh-host-webserver/)
   assert.match(PLUGIN_SOURCE, /guard !Self\.internalPluginDependencyNames\.contains\(name\) else \{ continue \}/)
